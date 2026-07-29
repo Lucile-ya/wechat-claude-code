@@ -94,8 +94,11 @@ function callClaudeCLI(systemPrompt, userMessage) {
       '--verbose',
       '--include-partial-messages',
       '--dangerously-skip-permissions',
-      '--append-system-prompt', systemPrompt,
     ];
+
+    // NOTE: system prompt is NOT passed via --append-system-prompt.
+    // The project's CLAUDE.md (synced from system_prompt.txt) is auto-loaded
+    // by Claude CLI from the working directory.
 
     const isWindows = process.platform === 'win32';
     let child;
@@ -206,7 +209,14 @@ function splitForWeChat(text) {
 // ── Main heartbeat handler ────────────────────────────────────────────────
 async function fireHeartbeat(label) {
   log(`Firing: ${label}`);
-  const systemPrompt = loadSystemPrompt();
+
+  // Sync system_prompt.txt → CLAUDE.md so Claude CLI picks it up automatically
+  try {
+    const sp = fs.readFileSync(SYSTEM_PROMPT_PATH, 'utf-8');
+    fs.writeFileSync(path.join(PMP_PROJECT, 'CLAUDE.md'), sp, 'utf-8');
+  } catch (e) {
+    log(`WARN: Failed to sync CLAUDE.md: ${e.message}`);
+  }
   const account = loadAccount();
   const userMessage = `[heartbeat: ${label}]`;
 
