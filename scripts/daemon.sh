@@ -236,40 +236,10 @@ linux_direct_start() {
   echo "Started (PID: $pid)"
   echo "Logs: $DATA_DIR/logs/stdout.log"
 
-  # Start heartbeat scheduler alongside daemon
-  local hb_pid_file="${DATA_DIR}/heartbeat-scheduler.pid"
-  local hb_script="${PROJECT_DIR}/heartbeat-scheduler.cjs"
-  if [ -f "$hb_script" ]; then
-    # Kill old heartbeat scheduler if running
-    if [ -f "$hb_pid_file" ]; then
-      local old_hb_pid=$(cat "$hb_pid_file" 2>/dev/null)
-      if [ -n "$old_hb_pid" ] && kill -0 "$old_hb_pid" 2>/dev/null; then
-        kill "$old_hb_pid" 2>/dev/null || true
-      fi
-      rm -f "$hb_pid_file"
-    fi
-    nohup "$node_bin" "$hb_script" \
-      >> "$DATA_DIR/logs/heartbeat.log" \
-      2>&1 &
-    local hb_pid=$!
-    echo "$hb_pid" > "$hb_pid_file"
-    echo "Heartbeat scheduler started (PID: $hb_pid)"
-  fi
 }
 
 linux_direct_stop() {
   local pid_file="$(linux_pid_file)"
-  local hb_pid_file="${DATA_DIR}/heartbeat-scheduler.pid"
-
-  # Stop heartbeat scheduler first
-  if [ -f "$hb_pid_file" ]; then
-    local hb_pid=$(cat "$hb_pid_file" 2>/dev/null)
-    if [ -n "$hb_pid" ] && kill -0 "$hb_pid" 2>/dev/null; then
-      kill "$hb_pid" 2>/dev/null || true
-      echo "Heartbeat scheduler stopped (PID: $hb_pid)"
-    fi
-    rm -f "$hb_pid_file"
-  fi
 
   if [ ! -f "$pid_file" ]; then
     echo "Not running (no PID file)"
@@ -301,7 +271,6 @@ linux_direct_stop() {
 
 linux_direct_status() {
   local pid_file="$(linux_pid_file)"
-  local hb_pid_file="${DATA_DIR}/heartbeat-scheduler.pid"
 
   if [ ! -f "$pid_file" ]; then
     echo "Daemon: Not running"
@@ -314,17 +283,6 @@ linux_direct_status() {
     else
       echo "Daemon: Not running (stale PID file)"
     fi
-  fi
-
-  if [ -f "$hb_pid_file" ]; then
-    local hb_pid=$(cat "$hb_pid_file" 2>/dev/null)
-    if [ -n "$hb_pid" ] && kill -0 "$hb_pid" 2>/dev/null; then
-      echo "Heartbeat Scheduler: Running (PID: $hb_pid)"
-    else
-      echo "Heartbeat Scheduler: Not running (stale PID file)"
-    fi
-  else
-    echo "Heartbeat Scheduler: Not running (no PID file)"
   fi
 }
 

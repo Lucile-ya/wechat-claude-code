@@ -210,12 +210,15 @@ function splitForWeChat(text) {
 async function fireHeartbeat(label) {
   log(`Firing: ${label}`);
 
-  // Sync system_prompt.txt → CLAUDE.md so Claude CLI picks it up automatically
+  // CLAUDE.md is the master copy. Do NOT overwrite it.
+  // If system_prompt.txt is newer, sync FROM CLAUDE.md instead.
   try {
-    const sp = fs.readFileSync(SYSTEM_PROMPT_PATH, 'utf-8');
-    fs.writeFileSync(path.join(PMP_PROJECT, 'CLAUDE.md'), sp, 'utf-8');
+    const claudePath = path.join(PMP_PROJECT, 'CLAUDE.md');
+    if (fs.existsSync(claudePath)) {
+      // Keep CLAUDE.md as-is; it may have manual edits
+    }
   } catch (e) {
-    log(`WARN: Failed to sync CLAUDE.md: ${e.message}`);
+    log(`WARN: CLAUDE.md check failed: ${e.message}`);
   }
   const account = loadAccount();
   const userMessage = `[heartbeat: ${label}]`;
