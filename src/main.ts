@@ -402,7 +402,7 @@ async function handleMessage(
   await flushPending(account.accountId, fromUserId, contextToken, sender);
 
   // Extract text from items
-  const userText = extractTextFromItems(msg.item_list);
+  let userText = extractTextFromItems(msg.item_list);
   const imageItem = extractFirstImageUrl(msg.item_list);
   const fileItem = extractFirstFileItem(msg.item_list);
 
@@ -455,28 +455,21 @@ async function handleMessage(
     return;
   }
 
-  // Bridge-level answer detection: extract answer string from long messages
-  const answerMatch = userText.match(/(?:我的答案是[：:]\s*|答案是[：:]\s*)([A-Da-d]{3,})/i) ||
-    userText.match(/^([A-Da-d]{3,})$/m);
-  if (answerMatch) {
-    // Auto-grade: short prompt, no resume (fresh context avoids CLAUDE.md noise)
+  // Any answer-like message (single letter, multi-letter, "我的答案是:XXX"):
+  // inject grading directive + never resume corrupted session.
+  const isAnswer = /^(?:我的答案是[：:]\s*|答案是[：:]\s*)?[A-Da-d]{1,}$/.test(userText.trim()) ||
+    /(?:我的答案是[：:]\s*|答案是[：:]\s*)([A-Da-d]{3,})/i.test(userText);
+  if (isAnswer) {
     session.sdkSessionId = undefined;
     sessionStore.save(account.accountId, session);
-    const answerStr = answerMatch[1].toUpperCase();
-    const enhancedPrompt = `判卷。题目见下方，答案串:${answerStr}（共${answerStr.length}题）。逐题输出表格:` +
-      `\n|题号|领域|大王答案|正确|解析|` +
-      `\n最后输出🎯 X/${answerStr.length} (X%)` +
-      `\n\n${userText}`;
-    await sendToClaude(
-      enhancedPrompt, imageItem, fileItem, fromUserId, contextToken,
-      account, session, sessionStore, sender, config, activeControllers,
-    );
-  } else {
-    await sendToClaude(
-      userText, imageItem, fileItem, fromUserId, contextToken,
-      account, session, sessionStore, sender, config, activeControllers,
-    );
+    userText = '[🚨判卷指令] ' + userText +
+      '\n\n(你刚才出了一道题在等答案。大王的这条消息是答题。立即判卷。答对 grade 5，答错 grade 1。从 error_log.json 查 correct_answer。只输出判卷结果。不要寒暄不要倒计时不要问需要什么。)';
   }
+
+  await sendToClaude(
+    userText, imageItem, fileItem, fromUserId, contextToken,
+    account, session, sessionStore, sender, config, activeControllers,
+  );
 }
 
 function extractTextFromItems(items: NonNullable<WeixinMessage['item_list']>): string {
