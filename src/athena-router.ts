@@ -60,6 +60,31 @@ interface DailyResolveResult {
   date?: string | null;
 }
 
+interface ScreenshotLogResult {
+  success: boolean;
+  is_correct?: boolean | null;
+  auto_action?: string;
+  human_confirm?: boolean;
+  needs_user_confirm?: boolean;
+  error_log_record_id?: number;
+  question_bank_record_id?: number;
+  extracted?: {
+    question?: string;
+    my_answer?: string;
+    correct_answer?: string;
+    knowledge_area?: string;
+    explanation?: string;
+  };
+  error?: string;
+}
+
+const SCREENSHOT_ERROR_TRIGGERS = [
+  /录入错题/,
+  /录错题/,
+  /错题录入/,
+  /截图录入/,
+];
+
 const REVIEW_TRIGGERS = [
   /^复习错题$/,
   /^今日复习错题$/,
@@ -76,6 +101,14 @@ const WEAKNESS_TRIGGERS = [
   /^我的弱点$/,
   /^分析薄弱$/,
   /^诊断报告$/,
+];
+
+const FREQUENT_ERROR_TRIGGERS = [
+  /^高频错题$/,
+  /^常错题$/,
+  /^反复错的题$/,
+  /^错题高频$/,
+  /^高频错误$/,
 ];
 
 const DAILY_TRIGGERS = [
@@ -168,6 +201,7 @@ export function isLikelyAthenaCommand(text: string): boolean {
   if (ANSWER_PATTERN.test(trimmed) || MULTI_ANSWER_PATTERN.test(trimmed)) return true;
   if (REVIEW_TRIGGERS.some((re) => re.test(trimmed))) return true;
   if (WEAKNESS_TRIGGERS.some((re) => re.test(trimmed))) return true;
+  if (FREQUENT_ERROR_TRIGGERS.some((re) => re.test(trimmed))) return true;
   if (DAILY_TRIGGERS.some((re) => re.test(trimmed))) return true;
   if (RANDOM_DAILY_TRIGGERS.some((re) => re.test(trimmed))) return true;
   if (REDO_DAILY_PREFIX.test(trimmed) || REDO_DAILY_SUFFIX.test(trimmed)) return true;
@@ -355,6 +389,21 @@ function gradeReviewAnswer(
         reviewTotal,
       },
     },
+  };
+}
+
+function runFrequentErrors(config: Config): AthenaRouteResult {
+  const { ok, stdout, stderr } = runStudyAdvisor(config, ['frequent-errors', '--json']);
+
+  if (!ok) {
+    logger.error('frequent-errors failed', { stderr });
+    return { handled: true, reply: '⚠️ 高频错题生成失败，请稍后重试。' };
+  }
+
+  const data = parseJson<{ status: string; text: string }>(stdout);
+  return {
+    handled: true,
+    reply: data?.text || stdout || '⚠️ 暂无高频错题数据',
   };
 }
 
@@ -617,6 +666,12 @@ export function routeAthenaMessage(
     return runWeakness(config);
   }
 
+  // 高频错题（总结+解答+口诀）
+  if (FREQUENT_ERROR_TRIGGERS.some((re) => re.test(trimmed))) {
+    logger.info('Athena hard route: frequent errors', { text: trimmed });
+    return runFrequentErrors(config);
+  }
+
   // 随机每日一练
   if (RANDOM_DAILY_TRIGGERS.some((re) => re.test(trimmed))) {
     return startDailyRandom(config);
@@ -650,4 +705,116 @@ export function routeAthenaMessage(
   }
 
   return { handled: false };
+}
+
+/** 是否应走截图录入错题硬路由 */
+export function shouldRouteScreenshotError(userText: string, hasImage: boolean): boolean {
+  if (!hasImage) return false;
+  const t = userText.trim().replace(/[\u200b\uFEFF]/g, '');
+  if (!t || t === '(图片)') return true;
+  if (SCREENSHOT_ERROR_TRIGGERS.some((re) => re.test(t))) return true;
+  return false;
+}
+
+function formatScreenshotLogReply(data: ScreenshotLogResult): string {
+  const ext = data.extracted || {};
+  const qPreview = ext.question
+    ? ext.question.length > 60
+      ? `${ext.question.slice(0, 60)}…`
+      : ext.question
+    : '（题干未完整识别）';
+
+  if (data.is_correct === true) {
+    return `✅ 识别为答对，无需录入错题。\n📝 ${qPreview}`;
+  }
+
+  if (data.is_correct === false && data.error_log_record_id) {
+    return [
+      `✅ 已录入错题 #${data.error_log_record_id} [${ext.knowledge_area || '未分类'}]`,
+      `📝 题干: ${qPreview}`,
+      `❌ 你的答案: ${ext.my_answer || '?'} → ✅ 正确答案: ${ext.correct_answer || '?'}`,
+      `💾 已同步 question_bank.json + error_review_state.json`,
+    ].join('\n');
+  }
+
+  if (data.is_correct === false && ext.correct_answer && ext.my_answer && data.human_confirm) {
+    return [
+      '⚠️ 答案识别置信度不足，未自动入库。',
+      `📝 ${qPreview}`,
+      `识别结果: 你的答案 ${ext.my_answer} → 正确答案 ${ext.correct_answer}`,
+      '请确认截图底部「正确答案/我的答案」是否清晰，或回复：我的答案 X，正确答案 Y',
+    ].join('\n');
+  }
+
+  if (data.is_correct === false && ext.correct_answer) {
+    return [
+      '⚠️ 识别为答错，但自动入库未完全成功。',
+      `📝 ${qPreview}`,
+      `❌ 你的答案: ${ext.my_answer || '未识别'} → ✅ 正确答案: ${ext.correct_answer}`,
+      '请补充：我的答案 X，正确答案 Y',
+    ].join('\n');
+  }
+
+  return [
+    '⚠️ 无法从截图自动识别错题信息。',
+    data.error ? `原因: ${data.error}` : '请确认截图包含题干、选项和「正确答案/我的答案」区域。',
+    '或手动发送：我的答案 X，正确答案 Y',
+  ].join('\n');
+}
+
+/** 截图 OCR + 自动录入错题（硬路由，不经过 Claude） */
+export function routeScreenshotError(
+  imagePath: string,
+  config: Config,
+): AthenaRouteResult {
+  logger.info('Athena hard route: screenshot error log', { imagePath });
+
+  const { ok, stdout, stderr } = runPythonScript(config, 'image_processor.py', [
+    imagePath,
+    '--json',
+  ]);
+
+  if (!ok) {
+    logger.error('screenshot error log failed', { stderr, imagePath });
+    return {
+      handled: true,
+      reply: '⚠️ 截图识别失败，请稍后重试或手动发送「我的答案 X，正确答案 Y」。',
+    };
+  }
+
+  const raw = parseJson<{
+    success?: boolean;
+    error?: string;
+    answer_validation?: ScreenshotLogResult & {
+      extracted?: ScreenshotLogResult['extracted'];
+    };
+  }>(stdout);
+
+  if (!raw?.success) {
+    return {
+      handled: true,
+      reply: `⚠️ 截图处理失败：${raw?.error || stderr || '未知错误'}`,
+    };
+  }
+
+  const v = raw.answer_validation;
+  if (!v) {
+    return {
+      handled: true,
+      reply: '⚠️ 未能从截图识别题目，请换一张更清晰的截图。',
+    };
+  }
+
+  const data: ScreenshotLogResult = {
+    success: true,
+    is_correct: v.is_correct,
+    auto_action: v.auto_action,
+    human_confirm: v.human_confirm,
+    needs_user_confirm: v.needs_user_confirm,
+    error_log_record_id: v.error_log_record_id,
+    question_bank_record_id: v.question_bank_record_id,
+    extracted: v.extracted,
+  };
+
+  return { handled: true, reply: formatScreenshotLogReply(data) };
 }

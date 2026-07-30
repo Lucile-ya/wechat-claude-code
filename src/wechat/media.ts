@@ -74,6 +74,24 @@ export async function downloadImage(item: MessageItem): Promise<string | null> {
   }
 }
 
+/** 下载图片并保存为本地临时文件，供 Python OCR 管线使用。 */
+export async function downloadImageToFile(item: MessageItem): Promise<string | null> {
+  const dataUri = await downloadImage(item);
+  if (!dataUri) return null;
+
+  const matches = dataUri.match(/^data:([^;]+);base64,(.+)$/);
+  if (!matches) return null;
+
+  const mime = matches[1];
+  const ext = mime.includes('png') ? '.png' : '.jpg';
+  const dir = path.join(os.tmpdir(), 'wechat-claude-code', 'images');
+  fs.mkdirSync(dir, { recursive: true });
+  const filePath = path.join(dir, `img_${Date.now()}${ext}`);
+  fs.writeFileSync(filePath, Buffer.from(matches[2], 'base64'));
+  logger.info('Image saved to temp file', { filePath });
+  return filePath;
+}
+
 export function extractText(item: MessageItem): string {
   if (item.text_item?.text) return item.text_item.text;
   if (item.voice_item?.text) return item.voice_item.text;

@@ -20,10 +20,10 @@ import { saveAccount, loadLatestAccount, type AccountData } from './wechat/accou
 import { startQrLogin, waitForQrScan } from './wechat/login.js';
 import { createMonitor, type MonitorCallbacks } from './wechat/monitor.js';
 import { createSender } from './wechat/send.js';
-import { downloadImage, extractText, extractFirstImageUrl, extractFirstFileItem, downloadFile } from './wechat/media.js';
+import { downloadImage, downloadImageToFile, extractText, extractFirstImageUrl, extractFirstFileItem, downloadFile } from './wechat/media.js';
 import { createSessionStore, type Session } from './session.js';
 import { routeCommand, type CommandContext, type CommandResult } from './commands/router.js';
-import { routeAthenaMessage, isLikelyAthenaCommand } from './athena-router.js';
+import { routeAthenaMessage, isLikelyAthenaCommand, shouldRouteScreenshotError, routeScreenshotError } from './athena-router.js';
 import { claudeQuery, type QueryOptions } from './claude/provider.js';
 import { TurnRouter } from './claude/turn-router.js';
 import { filterToolNoise } from './claude/tool-noise-filter.js';
@@ -553,6 +553,26 @@ async function handleMessage(
     }
 
     // Not handled, treat as normal message (fall through)
+  }
+
+  // -- PMP Athena 截图录入错题（图片硬路由，优先于 Claude）--
+
+  if (imageItem && shouldRouteScreenshotError(userText, true)) {
+    const imagePath = await downloadImageToFile(imageItem);
+    if (imagePath) {
+      const shotResult = routeScreenshotError(imagePath, config);
+      if (shotResult.handled && shotResult.reply) {
+        sessionStore.addChatMessage(session, 'user', userText || '(图片-录入错题)');
+        sessionStore.addChatMessage(session, 'assistant', shotResult.reply);
+        const chunks = splitMessage(shotResult.reply);
+        for (const chunk of chunks) {
+          await sender.sendText(fromUserId, contextToken, chunk);
+        }
+        session.state = 'idle';
+        sessionStore.save(account.accountId, session);
+        return;
+      }
+    }
   }
 
   // -- PMP Athena hard routing (before Claude) --
