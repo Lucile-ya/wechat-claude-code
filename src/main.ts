@@ -455,14 +455,18 @@ async function handleMessage(
     return;
   }
 
-  // Bridge-level answer detection: when the message is a pure answer string
-  // or "my answer is XXX", inject a directive so Claude grades it immediately.
-  // Match answer strings anywhere in the message: "我的答案是：BADCD" or just "BADCD"
+  // Bridge-level answer detection: extract answer string from long messages
   const answerMatch = userText.match(/(?:我的答案是[：:]\s*|答案是[：:]\s*)([A-Da-d]{3,})/i) ||
     userText.match(/^([A-Da-d]{3,})$/m);
   if (answerMatch) {
+    // Auto-grade: short prompt, no resume (fresh context avoids CLAUDE.md noise)
+    session.sdkSessionId = undefined;
+    sessionStore.save(account.accountId, session);
     const answerStr = answerMatch[1].toUpperCase();
-    const enhancedPrompt = `[🚨 这是答题指令 — 大王正在提交答案，答案字符串: ${answerStr}]\n\n请立即执行以下步骤:\n1. 回顾聊天历史中最���一轮发送的题目（按 Q1/Q2/.../#1/#2 排序）\n2. 将答案字符串 "${answerStr}" 逐字符匹配题目（第1个字母=第1题，第2个=第2题...）\n3. 从 error_log.json 或题目来源 PDF 查每题 correct_answer，逐题比对\n4. 错题执行\\\`python pmp_athena/error_logger.py add ...\\\` 和 \\\`python pmp_athena/question_bank.py add ...\\\`\n5. 正确题执行 \\\`python pmp_athena/question_bank.py add ... --is-correct true\\\`\n6. 输出汇总表格: 题号 | 领域 | 大王答案 | 正确 | 解析\n7. 如果字母数 != 题目数，先提示大王确认\n\n[原始消息: ${userText}]`;
+    const enhancedPrompt = `判卷。题目见下方，答案串:${answerStr}（共${answerStr.length}题）。逐题输出表格:` +
+      `\n|题号|领域|大王答案|正确|解析|` +
+      `\n最后输出🎯 X/${answerStr.length} (X%)` +
+      `\n\n${userText}`;
     await sendToClaude(
       enhancedPrompt, imageItem, fileItem, fromUserId, contextToken,
       account, session, sessionStore, sender, config, activeControllers,
