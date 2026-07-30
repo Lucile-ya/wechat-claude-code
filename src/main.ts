@@ -270,6 +270,10 @@ async function runDaemon(): Promise<void> {
   const sharedCtx = { lastContextToken: '' };
   const activeControllers = new Map<string, AbortController>();
 
+  // -- Dedup by seq number (safe, small integers). message_id is a 64-bit int
+  //    that loses precision in JS; we track seq instead.
+  const processedSeqs = new Set<number>();
+
   // -- Message queue for serial processing --
   const messageQueue: WeixinMessage[] = [];
   let processingQueue = false;
@@ -279,7 +283,7 @@ async function runDaemon(): Promise<void> {
     processingQueue = true;
     while (messageQueue.length > 0) {
       const msg = messageQueue.shift()!;
-      await handleMessage(msg, account!, session, sessionStore, sender, config, sharedCtx, activeControllers, messageQueue);
+      await handleMessage(msg, account!, session, sessionStore, sender, config, sharedCtx, activeControllers, messageQueue, processedSeqs);
     }
     processingQueue = false;
   }
@@ -350,11 +354,32 @@ async function handleMessage(
   sharedCtx: { lastContextToken: string },
   activeControllers: Map<string, AbortController>,
   messageQueue: WeixinMessage[],
+  processedSeqs: Set<number>,
 ): Promise<void> {
   // Filter: only user messages with required fields
   if (msg.message_type !== MessageType.USER) return;
   if (!msg.from_user_id || !msg.item_list) return;
   if (account.userId && msg.from_user_id !== account.userId) return;
+
+  // Dedup by seq number: seq is a small integer (no 64-bit precision issues).
+  // The monitor's recentMsgIds should already catch most duplicates, but this
+  // is a belt-and-suspenders check at the handler level.
+  if (msg.seq !== undefined) {
+    if (processedSeqs.has(msg.seq)) {
+      logger.debug('Dropping duplicate message', { seq: msg.seq });
+      return;
+    }
+    processedSeqs.add(msg.seq);
+    if (processedSeqs.size > 500) {
+      const iter = processedSeqs.values();
+      const toDelete: number[] = [];
+      for (let i = 0; i < 250; i++) {
+        const { value } = iter.next();
+        if (value !== undefined) toDelete.push(value);
+      }
+      for (const id of toDelete) processedSeqs.delete(id);
+    }
+  }
 
   const contextToken = msg.context_token ?? '';
   const fromUserId = msg.from_user_id;
@@ -591,27 +616,15 @@ async function sendToClaude(
 
     const router = new TurnRouter((msg) => emitText(filterToolNoise(msg.text), msg.role));
 
-    // Safety net: send keepalive if nothing was sent for 5 minutes
+    // Safety net: send ONE keepalive if nothing was sent for 5 minutes, then stay silent
     const SILENCE_WARNING_MS = 5 * 60 * 1000;
-    const SILENCE_MESSAGES = [
-      '我还在处理中，这个问题有点复杂，请再稍等一下',
-      '正在努力干活中，马上就有结果了，请稍等片刻',
-      '有点复杂正在处理，再给我一点时间，很快就好',
-      '快好了别着急，正在收尾阶段，马上给你回复',
-      '还在跑呢，任务量比较大，不过马上就能出结果了',
-      '任务比想象的复杂一些，再等等我，正在全力处理',
-      '正在处理中，进展顺利，再等一会儿就好',
-      '还没完不过已经快了，再给我一分钟就能搞定',
-      '我在认真思考这个问题，请再稍等一会儿',
-      '稍微有点棘手，不过已经快解决了，再等我一下',
-    ];
+    let silenceWarned = false;
     flushTimer = setInterval(() => {
-      if (Date.now() - lastSentTime > SILENCE_WARNING_MS) {
-        const msg = SILENCE_MESSAGES[Math.floor(Math.random() * SILENCE_MESSAGES.length)];
-        sender.sendText(fromUserId, contextToken, msg).catch(() => {});
-        lastSentTime = Date.now();
+      if (!silenceWarned && Date.now() - lastSentTime > SILENCE_WARNING_MS) {
+        silenceWarned = true;
+        sender.sendText(fromUserId, contextToken, '还在处理中，请稍等…').catch(() => {});
       }
-    }, 2000);
+    }, 10000);
 
     const queryOptions: QueryOptions = {
       prompt,
