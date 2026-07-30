@@ -36,6 +36,16 @@ export interface Session {
   state: SessionState;
   chatHistory: ChatMessage[];
   maxHistoryLength?: number;
+  /** PMP Athena 硬路由会话状态 */
+  athena?: {
+    mode: 'review' | 'daily' | 'daily_select';
+    currentErrorId?: number;
+    reviewCorrect?: number;
+    reviewTotal?: number;
+    dailyQuestionIndex?: number;
+    dailyTotal?: number;
+    dailyCorrect?: number;
+  };
 }
 
 const DEFAULT_MAX_HISTORY = 100;

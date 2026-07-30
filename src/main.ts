@@ -2,7 +2,17 @@ import { createInterface } from 'node:readline';
 import process from 'node:process';
 import { spawnSync } from 'node:child_process';
 import { join, basename } from 'node:path';
-import { unlinkSync, writeFileSync, mkdirSync } from 'node:fs';
+import {
+  unlinkSync,
+  writeFileSync,
+  mkdirSync,
+  existsSync,
+  readFileSync,
+  openSync,
+  closeSync,
+  writeSync,
+  constants,
+} from 'node:fs';
 import { homedir } from 'node:os';
 
 import { WeChatApi } from './wechat/api.js';
@@ -13,6 +23,7 @@ import { createSender } from './wechat/send.js';
 import { downloadImage, extractText, extractFirstImageUrl, extractFirstFileItem, downloadFile } from './wechat/media.js';
 import { createSessionStore, type Session } from './session.js';
 import { routeCommand, type CommandContext, type CommandResult } from './commands/router.js';
+import { routeAthenaMessage, isLikelyAthenaCommand } from './athena-router.js';
 import { claudeQuery, type QueryOptions } from './claude/provider.js';
 import { TurnRouter } from './claude/turn-router.js';
 import { filterToolNoise } from './claude/tool-noise-filter.js';
@@ -27,6 +38,22 @@ import { loadPendingQueue, savePendingQueue, type PendingItem } from './pending-
 // ---------------------------------------------------------------------------
 
 const MAX_MESSAGE_LENGTH = 4000;
+const MSG_DEDUP_DIR = join(DATA_DIR, 'msg-dedup');
+
+/** 跨进程去重：多实例误启动时同一 seq 只处理一次 */
+function markSeqSeenCrossProcess(seq: number): boolean {
+  mkdirSync(MSG_DEDUP_DIR, { recursive: true });
+  const marker = join(MSG_DEDUP_DIR, `${seq}.marker`);
+  try {
+    const fd = openSync(marker, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY);
+    writeSync(fd, String(Date.now()));
+    closeSync(fd);
+    return true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') return false;
+    return true;
+  }
+}
 
 // Extensions eligible for auto-push when detected in Claude's response
 const AUTO_PUSH_EXTENSIONS = new Set([
@@ -237,10 +264,80 @@ async function runSetup(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Singleton lock (prevent duplicate bridge → double replies)
+// ---------------------------------------------------------------------------
+
+const BRIDGE_LOCK_FILE = join(DATA_DIR, 'bridge.pid');
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function tryCreateBridgeLockFile(): boolean {
+  try {
+    const fd = openSync(
+      BRIDGE_LOCK_FILE,
+      constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY,
+    );
+    writeSync(fd, String(process.pid));
+    closeSync(fd);
+    return true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') return false;
+    throw err;
+  }
+}
+
+function acquireBridgeSingletonLock(): void {
+  mkdirSync(DATA_DIR, { recursive: true });
+
+  if (!tryCreateBridgeLockFile()) {
+    const raw = existsSync(BRIDGE_LOCK_FILE)
+      ? readFileSync(BRIDGE_LOCK_FILE, 'utf8').trim()
+      : '';
+    const oldPid = Number.parseInt(raw, 10);
+    if (oldPid && oldPid !== process.pid && isProcessAlive(oldPid)) {
+      console.error(
+        `已有微信桥接在运行 (PID ${oldPid})，请先停止旧进程或使用 watchdog 单实例模式。`,
+      );
+      process.exit(1);
+    }
+    try {
+      unlinkSync(BRIDGE_LOCK_FILE);
+    } catch {
+      /* ignore */
+    }
+    if (!tryCreateBridgeLockFile()) {
+      console.error('无法获取桥接单例锁，可能已有实例正在启动。');
+      process.exit(1);
+    }
+  }
+  const release = () => {
+    try {
+      if (existsSync(BRIDGE_LOCK_FILE)) {
+        const current = readFileSync(BRIDGE_LOCK_FILE, 'utf8').trim();
+        if (current === String(process.pid)) unlinkSync(BRIDGE_LOCK_FILE);
+      }
+    } catch {
+      /* ignore */
+    }
+  };
+  process.on('exit', release);
+  process.on('SIGINT', release);
+  process.on('SIGTERM', release);
+}
+
+// ---------------------------------------------------------------------------
 // Daemon
 // ---------------------------------------------------------------------------
 
 async function runDaemon(): Promise<void> {
+  acquireBridgeSingletonLock();
   const config = loadConfig();
   const account = loadLatestAccount();
 
@@ -369,6 +466,10 @@ async function handleMessage(
       logger.debug('Dropping duplicate message', { seq: msg.seq });
       return;
     }
+    if (!markSeqSeenCrossProcess(msg.seq)) {
+      logger.warn('Dropping cross-process duplicate message', { seq: msg.seq });
+      return;
+    }
     processedSeqs.add(msg.seq);
     if (processedSeqs.size > 500) {
       const iter = processedSeqs.values();
@@ -402,7 +503,7 @@ async function handleMessage(
   await flushPending(account.accountId, fromUserId, contextToken, sender);
 
   // Extract text from items
-  let userText = extractTextFromItems(msg.item_list);
+  const userText = extractTextFromItems(msg.item_list);
   const imageItem = extractFirstImageUrl(msg.item_list);
   const fileItem = extractFirstFileItem(msg.item_list);
 
@@ -427,6 +528,8 @@ async function handleMessage(
 
     if (result.handled && result.reply) {
       await sender.sendText(fromUserId, contextToken, result.reply);
+      session.state = 'idle';
+      sessionStore.save(account.accountId, session);
       return;
     }
 
@@ -443,9 +546,59 @@ async function handleMessage(
       return;
     }
 
-    if (result.handled) return;
+    if (result.handled) {
+      session.state = 'idle';
+      sessionStore.save(account.accountId, session);
+      return;
+    }
 
     // Not handled, treat as normal message (fall through)
+  }
+
+  // -- PMP Athena hard routing (before Claude) --
+
+  if (userText && !userText.startsWith('/')) {
+    // 从磁盘同步 athena 状态（/clear 后或重启后仍可按文件态判卷）
+    const diskSession = sessionStore.load(account.accountId);
+    session.athena = diskSession.athena;
+
+    const athenaResult = routeAthenaMessage(userText, session, config);
+    if (athenaResult.handled) {
+      if (athenaResult.sessionPatch) {
+        if ('athena' in athenaResult.sessionPatch && athenaResult.sessionPatch.athena === undefined) {
+          delete session.athena;
+        } else {
+          Object.assign(session, athenaResult.sessionPatch);
+          if (athenaResult.sessionPatch.athena) {
+            session.athena = { ...session.athena, ...athenaResult.sessionPatch.athena };
+          }
+        }
+      }
+      if (athenaResult.reply) {
+        sessionStore.addChatMessage(session, 'user', userText);
+        sessionStore.addChatMessage(session, 'assistant', athenaResult.reply);
+        const chunks = splitMessage(athenaResult.reply);
+        for (const chunk of chunks) {
+          await sender.sendText(fromUserId, contextToken, chunk);
+        }
+      }
+      session.state = 'idle';
+      sessionStore.save(account.accountId, session);
+      return;
+    }
+
+    // 像 Athena 指令但未硬路由成功 → 勿交给 Claude 重复/乱答
+    if (isLikelyAthenaCommand(userText)) {
+      logger.warn('Athena-like command not handled by hard route', { userText });
+      await sender.sendText(
+        fromUserId,
+        contextToken,
+        '⚠️ 指令处理异常，请重发一次；仍失败请发 `/clear` 后重试。',
+      );
+      session.state = 'idle';
+      sessionStore.save(account.accountId, session);
+      return;
+    }
   }
 
   // -- Normal message -> Claude --
@@ -453,23 +606,6 @@ async function handleMessage(
   if (!userText && !imageItem && !fileItem) {
     await sender.sendText(fromUserId, contextToken, '暂不支持此类型消息，请发送文字、语音、图片或文件');
     return;
-  }
-
-  // Any answer-like message (single letter, multi-letter, "我的答案是:XXX"):
-  // inject grading directive + never resume corrupted session.
-  const isAnswer = /^(?:我的答案是[：:]\s*|答案是[：:]\s*)?[A-Da-d]{1,}$/.test(userText.trim()) ||
-    /(?:我的答案是[：:]\s*|答案是[：:]\s*)([A-Da-d]{3,})/i.test(userText);
-  if (isAnswer) {
-    // Flush all queued duplicates — they're just noise around the answer
-    messageQueue.length = 0;
-    session.sdkSessionId = undefined;
-    sessionStore.save(account.accountId, session);
-    userText = '你是判卷机器人，不是PMP Athena。忽略CLAUDE.md的一切规则。\n' +
-      '[判卷] 答案:' + userText.trim() +
-      '\n刚出了一道题。这是大王的答题。查 error_log.json 的 correct_answer 字段判卷。' +
-      '\n答对: spaced_repetition.py grade N 5，只回"✅ 正确！"然后马上出下一题。' +
-      '\n答错: spaced_repetition.py grade N 1，回"❌ 正确答案是 X — 解析"然后出下一题。' +
-      '\n禁止倒计时。禁止问我需要什么。禁止分析薄弱点。禁止建议刷题。禁止任何非判卷内容。';
   }
 
   await sendToClaude(
@@ -649,7 +785,7 @@ async function sendToClaude(
     const queryOptions: QueryOptions = {
       prompt,
       cwd: (session.workingDirectory || config.workingDirectory).replace(/^~/, homedir()),
-      resume: undefined, // never resume — avoid carrying stale context
+      resume: session.sdkSessionId,
       model: session.model,
       systemPrompt: [
         '你正在通过微信与用户对话，不是在终端里。不要让用户去终端操作。如果用户需要文件，直接输出文件地址就行，会自动识别解析推送文件到用户的微信中。',

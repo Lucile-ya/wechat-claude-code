@@ -26,6 +26,7 @@ export function loadConfig(): Config {
       workingDirectory: parsed.workingDirectory || DEFAULT_CONFIG.workingDirectory,
       model: parsed.model,
       systemPrompt: parsed.systemPrompt,
+      pythonBin: parsed.pythonBin || DEFAULT_CONFIG.pythonBin,
     };
     mkdirSync(config.workingDirectory, { recursive: true });
     return config;
