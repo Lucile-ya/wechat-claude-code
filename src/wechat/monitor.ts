@@ -17,7 +17,8 @@ export interface MonitorCallbacks {
 export function createMonitor(api: WeChatApi, callbacks: MonitorCallbacks) {
   const controller = new AbortController();
   let stopped = false;
-  const recentMsgIds = new Set<number>();
+  // string key to avoid JS number precision loss (WeChat IDs are 64-bit)
+  const recentMsgIds = new Set<string>();
   const MAX_MSG_IDS = 1000;
 
   async function run(): Promise<void> {
@@ -53,15 +54,15 @@ export function createMonitor(api: WeChatApi, callbacks: MonitorCallbacks) {
           logger.info('Received messages', { count: messages.length });
           for (const msg of messages) {
             // Skip already-processed messages
-            if (msg.message_id && recentMsgIds.has(msg.message_id)) {
+            if (msg.message_id && recentMsgIds.has(String(msg.message_id))) {
               continue;
             }
             if (msg.message_id) {
-              recentMsgIds.add(msg.message_id);
+              recentMsgIds.add(String(msg.message_id));
               if (recentMsgIds.size > MAX_MSG_IDS) {
                 // Evict oldest half (Set iterates in insertion order)
                 const iter = recentMsgIds.values();
-                const toDelete: number[] = [];
+                const toDelete: string[] = [];
                 for (let i = 0; i < MAX_MSG_IDS / 2; i++) {
                   const { value } = iter.next();
                   if (value !== undefined) toDelete.push(value);
