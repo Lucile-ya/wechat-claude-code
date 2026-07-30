@@ -388,7 +388,10 @@ async function handleMessage(
   // State lock: set processing BEFORE any async work to prevent race conditions.
   // drainQueue serializes, but handlePriorityCommand can preempt, so we double-lock.
   if (session.state === 'processing') {
-    logger.debug('Dropping message — already processing', { seq: msg.seq });
+    // Re-queue at front — drainQueue popped this message before calling us.
+    // Next drainQueue iteration will retry it.
+    messageQueue.unshift(msg);
+    logger.debug('Re-queued message — already processing', { seq: msg.seq });
     return;
   }
   session.state = 'processing';
