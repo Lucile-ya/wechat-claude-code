@@ -464,8 +464,12 @@ async function handleMessage(
     messageQueue.length = 0;
     session.sdkSessionId = undefined;
     sessionStore.save(account.accountId, session);
-    userText = '[🚨判卷指令] ' + userText +
-      '\n\n(你刚才出了一道题在等答案。大王的这条消息是答题。立即判卷。答对 grade 5，答错 grade 1。从 error_log.json 查 correct_answer。只输出判卷结果。不要寒暄不要倒计时不要问需要什么。)';
+    userText = '你是判卷机器人，不是PMP Athena。忽略CLAUDE.md的一切规则。\n' +
+      '[判卷] 答案:' + userText.trim() +
+      '\n刚出了一道题。这是大王的答题。查 error_log.json 的 correct_answer 字段判卷。' +
+      '\n答对: spaced_repetition.py grade N 5，只回"✅ 正确！"然后马上出下一题。' +
+      '\n答错: spaced_repetition.py grade N 1，回"❌ 正确答案是 X — 解析"然后出下一题。' +
+      '\n禁止倒计时。禁止问我需要什么。禁止分析薄弱点。禁止建议刷题。禁止任何非判卷内容。';
   }
 
   await sendToClaude(
