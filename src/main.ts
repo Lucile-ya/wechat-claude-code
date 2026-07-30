@@ -460,6 +460,8 @@ async function handleMessage(
   const isAnswer = /^(?:我的答案是[：:]\s*|答案是[：:]\s*)?[A-Da-d]{1,}$/.test(userText.trim()) ||
     /(?:我的答案是[：:]\s*|答案是[：:]\s*)([A-Da-d]{3,})/i.test(userText);
   if (isAnswer) {
+    // Flush all queued duplicates — they're just noise around the answer
+    messageQueue.length = 0;
     session.sdkSessionId = undefined;
     sessionStore.save(account.accountId, session);
     userText = '[🚨判卷指令] ' + userText +
