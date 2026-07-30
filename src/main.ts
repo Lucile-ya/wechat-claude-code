@@ -423,6 +423,10 @@ async function handleMessage(
     return;
   }
 
+  // Set state before spawning Claude to prevent duplicate message processing
+  session.state = 'processing';
+  sessionStore.save(account.accountId, session);
+
   await sendToClaude(
     userText, imageItem, fileItem, fromUserId, contextToken,
     account, session, sessionStore, sender, config, activeControllers,

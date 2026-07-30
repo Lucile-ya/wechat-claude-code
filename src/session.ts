@@ -1,10 +1,24 @@
 import { loadJson, saveJson, validateAccountId } from './store.js';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, existsSync, readFileSync } from 'node:fs';
 import { DATA_DIR, DEFAULT_WORKING_DIR } from './constants.js';
 import { join } from 'node:path';
 import { logger } from './logger.js';
 
 const SESSIONS_DIR = join(DATA_DIR, 'sessions');
+const CONFIG_PATH = join(DATA_DIR, 'config.json');
+
+/** Read workingDirectory from config.json, or fall back to hardcoded default */
+function getWorkingDirFromConfig(): string {
+  try {
+    if (existsSync(CONFIG_PATH)) {
+      const config = JSON.parse(readFileSync(CONFIG_PATH, 'utf-8'));
+      if (config.workingDirectory) return config.workingDirectory;
+    }
+  } catch (e) {
+    logger.warn('Failed to read workingDirectory from config.json, using default', { error: String(e) });
+  }
+  return DEFAULT_WORKING_DIR;
+}
 
 export type SessionState = 'idle' | 'processing';
 
@@ -35,7 +49,7 @@ export function createSessionStore() {
   function load(accountId: string): Session {
     validateAccountId(accountId);
     const session = loadJson<Session>(getSessionPath(accountId), {
-      workingDirectory: DEFAULT_WORKING_DIR,
+      workingDirectory: getWorkingDirFromConfig(),
       state: 'idle',
       chatHistory: [],
       maxHistoryLength: DEFAULT_MAX_HISTORY,
@@ -68,7 +82,7 @@ export function createSessionStore() {
     const session: Session = {
       sdkSessionId: undefined,          // explicitly clear so Object.assign removes it
       previousSdkSessionId: undefined,
-      workingDirectory: currentSession?.workingDirectory ?? DEFAULT_WORKING_DIR,
+      workingDirectory: currentSession?.workingDirectory ?? getWorkingDirFromConfig(),
       model: currentSession?.model,
       state: 'idle',
       chatHistory: [],
