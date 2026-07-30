@@ -94,7 +94,15 @@ export class WeChatApi {
         throw new Error(`HTTP ${res.status}: ${text}`);
       }
 
-      const json = (await res.json()) as T;
+      // Parse with bigint protection: JSON numbers > 2^53-1 lose precision in JS.
+      // WeChat message_id values are 64-bit. Wrap 17+ digit integers in quotes
+      // before parsing so they survive as strings for dedup purposes.
+      const raw = await res.text();
+      const safeJson = raw.replace(
+        /(?<=[\s:,[])(\d{17,})(?=[\s,\]}])/g,
+        '"$1"',
+      );
+      const json = JSON.parse(safeJson) as T;
       logger.debug('API response', json);
       return json;
     } catch (err) {

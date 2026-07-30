@@ -76,7 +76,7 @@ export interface MessageItem {
 
 export interface WeixinMessage {
   seq?: number;
-  message_id?: number;
+  message_id?: number | string;
   from_user_id?: string;
   to_user_id?: string;
   create_time_ms?: number;
