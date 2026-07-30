@@ -385,6 +385,15 @@ async function handleMessage(
   const fromUserId = msg.from_user_id;
   sharedCtx.lastContextToken = contextToken;
 
+  // State lock: set processing BEFORE any async work to prevent race conditions.
+  // drainQueue serializes, but handlePriorityCommand can preempt, so we double-lock.
+  if (session.state === 'processing') {
+    logger.debug('Dropping message — already processing', { seq: msg.seq });
+    return;
+  }
+  session.state = 'processing';
+  sessionStore.save(account.accountId, session);
+
   // Flush any pending messages from prior rate-limit windows. User's new
   // message brings a fresh context_token, which resets the iLink 11-msg quota.
   await flushPending(account.accountId, fromUserId, contextToken, sender);
@@ -393,11 +402,6 @@ async function handleMessage(
   const userText = extractTextFromItems(msg.item_list);
   const imageItem = extractFirstImageUrl(msg.item_list);
   const fileItem = extractFirstFileItem(msg.item_list);
-
-  // Drop non-command messages while processing (priority commands already handled upstream)
-  if (session.state === 'processing' && !userText.startsWith('/')) {
-    return;
-  }
 
   // -- Command routing --
 
@@ -447,10 +451,6 @@ async function handleMessage(
     await sender.sendText(fromUserId, contextToken, '暂不支持此类型消息，请发送文字、语音、图片或文件');
     return;
   }
-
-  // Set state before spawning Claude to prevent duplicate message processing
-  session.state = 'processing';
-  sessionStore.save(account.accountId, session);
 
   await sendToClaude(
     userText, imageItem, fileItem, fromUserId, contextToken,
