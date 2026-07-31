@@ -31,7 +31,7 @@ import { loadConfig, saveConfig } from './config.js';
 import { logger } from './logger.js';
 import { DATA_DIR } from './constants.js';
 import { MessageType, type WeixinMessage } from './wechat/types.js';
-import { loadPendingQueue, savePendingQueue, type PendingItem } from './pending-queue.js';
+import { loadPendingQueue, savePendingQueue, appendPending, type PendingItem } from './pending-queue.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -155,6 +155,30 @@ function splitMessage(text: string, maxLen: number = MAX_MESSAGE_LENGTH): string
   }
   if (current) chunks.push(current);
   return chunks;
+}
+
+/** Send reply; on WeChat rate-limit park to pending queue instead of silently dropping. */
+async function sendReplyOrQueue(
+  accountId: string,
+  toUserId: string,
+  contextToken: string,
+  sender: ReturnType<typeof createSender>,
+  text: string,
+): Promise<'sent' | 'queued'> {
+  try {
+    for (const chunk of splitMessage(text)) {
+      await sender.sendText(toUserId, contextToken, chunk);
+    }
+    return 'sent';
+  } catch (err) {
+    appendPending(accountId, { text, role: 'final', queuedAt: Date.now() });
+    logger.warn('Reply queued after send failure', {
+      accountId,
+      textLength: text.length,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return 'queued';
+  }
 }
 
 function promptUser(question: string, defaultValue?: string): Promise<string> {
@@ -565,9 +589,17 @@ async function handleMessage(
       if (shotResult.handled && shotResult.reply) {
         sessionStore.addChatMessage(session, 'user', userText || `(图片×${imagePaths.length}-录入错题)`);
         sessionStore.addChatMessage(session, 'assistant', shotResult.reply);
-        const chunks = splitMessage(shotResult.reply);
-        for (const chunk of chunks) {
-          await sender.sendText(fromUserId, contextToken, chunk);
+        const status = await sendReplyOrQueue(
+          account.accountId, fromUserId, contextToken, sender, shotResult.reply,
+        );
+        if (status === 'queued') {
+          await sendReplyOrQueue(
+            account.accountId,
+            fromUserId,
+            contextToken,
+            sender,
+            '⏳ 录入成功，回复因微信限流暂存，稍后会自动补发（或再发任意消息触发补发）。',
+          );
         }
         session.state = 'idle';
         sessionStore.save(account.accountId, session);
@@ -584,9 +616,17 @@ async function handleMessage(
         if (shotResult.handled && shotResult.reply) {
           sessionStore.addChatMessage(session, 'user', userText || '(图片-录入错题)');
           sessionStore.addChatMessage(session, 'assistant', shotResult.reply);
-          const chunks = splitMessage(shotResult.reply);
-          for (const chunk of chunks) {
-            await sender.sendText(fromUserId, contextToken, chunk);
+          const status = await sendReplyOrQueue(
+            account.accountId, fromUserId, contextToken, sender, shotResult.reply,
+          );
+          if (status === 'queued') {
+            await sendReplyOrQueue(
+              account.accountId,
+              fromUserId,
+              contextToken,
+              sender,
+              '⏳ 录入成功，回复因微信限流暂存，稍后会自动补发（或再发任意消息触发补发）。',
+            );
           }
           session.state = 'idle';
           sessionStore.save(account.accountId, session);
@@ -609,10 +649,9 @@ async function handleMessage(
           if (cpResult.handled && cpResult.reply) {
             sessionStore.addChatMessage(session, 'user', userText || `(图片-章节练习-${chapter})`);
             sessionStore.addChatMessage(session, 'assistant', cpResult.reply);
-            const chunks = splitMessage(cpResult.reply);
-            for (const chunk of chunks) {
-              await sender.sendText(fromUserId, contextToken, chunk);
-            }
+            await sendReplyOrQueue(
+              account.accountId, fromUserId, contextToken, sender, cpResult.reply,
+            );
             session.state = 'idle';
             sessionStore.save(account.accountId, session);
             return;
