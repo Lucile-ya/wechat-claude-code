@@ -89,11 +89,13 @@ interface ImagePreprocessResult {
   processedPath: string;
   ocrText: string | null;
   originalPath: string;
-  answerValidation?: {
+    answerValidation?: {
     is_correct: boolean | null;
     confidence: number;
     primary_signal: string;
     auto_action: 'log_error' | 'log_mastered' | 'none';
+    screenshot_type?: 'error_result' | 'plain_question' | 'unknown';
+    formatted_question?: string;
     extracted?: {
       question?: string;
       my_answer?: string;
@@ -347,6 +349,21 @@ export async function claudeQuery(options: QueryOptions): Promise<QueryResult> {
     // Inject answer validation verdict so Claude knows immediately
     for (const v of (validationResults || [])) {
       if (!v) continue;
+
+      // 纯题干截图 → 解析模式，不走错题入库
+      if (v.screenshot_type === 'plain_question') {
+        prependBlock += '[题目识别]\n';
+        prependBlock += '类型: 纯题干截图（无作答结果）\n';
+        if (v.formatted_question) {
+          prependBlock += v.formatted_question + '\n';
+        } else if (v.extracted?.question) {
+          prependBlock += `题目: ${v.extracted.question}\n`;
+        }
+        prependBlock += '操作: 按 PMP 截图解析规则输出（答案+解析+记忆口诀）。若用户已告知选错选项，系统将在你给出答案后自动录入错题。\n';
+        prependBlock += '[/题目识别]\n\n';
+        continue;
+      }
+
       prependBlock += '[答题判定]\n';
       if (v.is_correct === true) {
         prependBlock += `状态: ✅ 答对了 (置信度 ${(v.confidence * 100).toFixed(0)}%)\n`;

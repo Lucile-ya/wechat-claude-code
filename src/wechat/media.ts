@@ -107,6 +107,22 @@ export function extractFirstImageUrl(items?: MessageItem[]): MessageItem | undef
   return items?.find((item) => item.type === MessageItemType.IMAGE);
 }
 
+/** 提取消息中全部图片（多图错题关联入库） */
+export function extractAllImageItems(items?: MessageItem[]): MessageItem[] {
+  if (!items?.length) return [];
+  return items.filter((item) => item.type === MessageItemType.IMAGE);
+}
+
+/** 批量下载图片到本地临时文件 */
+export async function downloadAllImagesToFiles(items: MessageItem[]): Promise<string[]> {
+  const paths: string[] = [];
+  for (const item of items) {
+    const p = await downloadImageToFile(item);
+    if (p) paths.push(p);
+  }
+  return paths;
+}
+
 /**
  * Find the first FILE type item in a list.
  */

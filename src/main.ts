@@ -20,10 +20,10 @@ import { saveAccount, loadLatestAccount, type AccountData } from './wechat/accou
 import { startQrLogin, waitForQrScan } from './wechat/login.js';
 import { createMonitor, type MonitorCallbacks } from './wechat/monitor.js';
 import { createSender } from './wechat/send.js';
-import { downloadImage, downloadImageToFile, extractText, extractFirstImageUrl, extractFirstFileItem, downloadFile } from './wechat/media.js';
+import { downloadImage, downloadImageToFile, downloadAllImagesToFiles, extractText, extractFirstImageUrl, extractAllImageItems, extractFirstFileItem, downloadFile } from './wechat/media.js';
 import { createSessionStore, type Session } from './session.js';
 import { routeCommand, type CommandContext, type CommandResult } from './commands/router.js';
-import { routeAthenaMessage, isLikelyAthenaCommand, shouldRouteScreenshotError, routeScreenshotError } from './athena-router.js';
+import { routeAthenaMessage, isLikelyAthenaCommand, shouldRouteScreenshotError, routeScreenshotError, routeMultiScreenshotError, shouldRouteChapterPractice, extractChapterFromCaption, preflightChapterPractice, routeChapterPractice, saveChapterPracticePending, routeChapterPracticePending, preflightScreenshot, savePendingPlainFromImage, applyPlainQuestionAfterParse } from './athena-router.js';
 import { claudeQuery, type QueryOptions } from './claude/provider.js';
 import { TurnRouter } from './claude/turn-router.js';
 import { filterToolNoise } from './claude/tool-noise-filter.js';
@@ -504,7 +504,8 @@ async function handleMessage(
 
   // Extract text from items
   const userText = extractTextFromItems(msg.item_list);
-  const imageItem = extractFirstImageUrl(msg.item_list);
+  const imageItems = extractAllImageItems(msg.item_list);
+  const imageItem = imageItems[0];
   const fileItem = extractFirstFileItem(msg.item_list);
 
   // -- Command routing --
@@ -555,14 +556,14 @@ async function handleMessage(
     // Not handled, treat as normal message (fall through)
   }
 
-  // -- PMP Athena 截图录入错题（图片硬路由，优先于 Claude）--
+  // -- PMP Athena 截图录入错题（作答结果 OCR / 配文触发 / 多图关联）--
 
-  if (imageItem && shouldRouteScreenshotError(userText, true)) {
-    const imagePath = await downloadImageToFile(imageItem);
-    if (imagePath) {
-      const shotResult = routeScreenshotError(imagePath, config);
+  if (imageItems.length > 0) {
+    const imagePaths = await downloadAllImagesToFiles(imageItems);
+    if (imagePaths.length >= 2) {
+      const shotResult = routeMultiScreenshotError(imagePaths, config, userText);
       if (shotResult.handled && shotResult.reply) {
-        sessionStore.addChatMessage(session, 'user', userText || '(图片-录入错题)');
+        sessionStore.addChatMessage(session, 'user', userText || `(图片×${imagePaths.length}-录入错题)`);
         sessionStore.addChatMessage(session, 'assistant', shotResult.reply);
         const chunks = splitMessage(shotResult.reply);
         for (const chunk of chunks) {
@@ -571,6 +572,66 @@ async function handleMessage(
         session.state = 'idle';
         sessionStore.save(account.accountId, session);
         return;
+      }
+    } else if (imagePaths.length === 1) {
+      const imagePath = imagePaths[0];
+      const explicitErrorLog = shouldRouteScreenshotError(userText, true);
+      const preflight = preflightScreenshot(imagePath, config);
+      const isErrorResult = preflight?.screenshotType === 'error_result';
+
+      if (explicitErrorLog || isErrorResult) {
+        const shotResult = routeScreenshotError(imagePath, config, userText);
+        if (shotResult.handled && shotResult.reply) {
+          sessionStore.addChatMessage(session, 'user', userText || '(图片-录入错题)');
+          sessionStore.addChatMessage(session, 'assistant', shotResult.reply);
+          const chunks = splitMessage(shotResult.reply);
+          for (const chunk of chunks) {
+            await sender.sendText(fromUserId, contextToken, chunk);
+          }
+          session.state = 'idle';
+          sessionStore.save(account.accountId, session);
+          return;
+        }
+      }
+
+      // 章节练习统计截图（配文带章节名，或 OCR 自动识别统计页）
+      const chapterFromCaption = extractChapterFromCaption(userText);
+      const cpPreflight = preflightChapterPractice(imagePath, config);
+      const tryChapterPractice =
+        shouldRouteChapterPractice(userText, true)
+        || (cpPreflight?.isStats && !!(chapterFromCaption || cpPreflight.chapter));
+
+      if (tryChapterPractice) {
+        const chapter = chapterFromCaption || cpPreflight?.chapter;
+        if (chapter) {
+          logger.info('Athena route: chapter practice', { chapter, fromOcr: !chapterFromCaption });
+          const cpResult = routeChapterPractice(imagePath, config, chapter, userText);
+          if (cpResult.handled && cpResult.reply) {
+            sessionStore.addChatMessage(session, 'user', userText || `(图片-章节练习-${chapter})`);
+            sessionStore.addChatMessage(session, 'assistant', cpResult.reply);
+            const chunks = splitMessage(cpResult.reply);
+            for (const chunk of chunks) {
+              await sender.sendText(fromUserId, contextToken, chunk);
+            }
+            session.state = 'idle';
+            sessionStore.save(account.accountId, session);
+            return;
+          }
+        } else if (cpPreflight?.isStats) {
+          saveChapterPracticePending(imagePath, config);
+          await sender.sendText(
+            fromUserId,
+            contextToken,
+            '📊 已识别章节练习统计页。\n请回复章节名，如：范围管理',
+          );
+          session.state = 'idle';
+          sessionStore.save(account.accountId, session);
+          return;
+        }
+      }
+
+      if (preflight?.screenshotType === 'plain_question' && !explicitErrorLog) {
+        savePendingPlainFromImage(imagePath, config, userText);
       }
     }
   }
@@ -906,6 +967,16 @@ async function sendToClaude(
       if (!anySent) {
         const chunks = splitMessage(result.text);
         for (const chunk of chunks) {
+          await sender.sendText(fromUserId, contextToken, chunk);
+        }
+      }
+
+      // 纯题干：用户已报选错 + Claude 已给答案 → 自动入库
+      const plainLogReply = applyPlainQuestionAfterParse(result.text, config);
+      if (plainLogReply) {
+        sessionStore.addChatMessage(session, 'assistant', plainLogReply);
+        const logChunks = splitMessage(plainLogReply);
+        for (const chunk of logChunks) {
           await sender.sendText(fromUserId, contextToken, chunk);
         }
       }

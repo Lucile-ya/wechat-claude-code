@@ -78,11 +78,57 @@ interface ScreenshotLogResult {
   error?: string;
 }
 
+/** 发图配文触发录入错题（与 OCR 识别 error_result 并列） */
 const SCREENSHOT_ERROR_TRIGGERS = [
   /录入错题/,
   /录错题/,
   /错题录入/,
   /截图录入/,
+  /选错了/,
+  /这题错了/,
+  /这题(?:做)?错了/,
+  /(?:我)?(?:这题)?答错了/,
+  /我的答案[是为：:\s]*[A-Ea-e].{0,40}?正确(?:答案)?[是为：:\s]*[A-Ea-e]/i,
+  /正确(?:答案)?[是为：:\s]*[A-Ea-e]/i,
+];
+
+/** PMP 知识领域（章节练习截图配文识别） */
+const KNOWLEDGE_AREA_NAMES = [
+  '整合管理', '范围管理', '进度管理', '成本管理', '质量管理',
+  '资源管理', '沟通管理', '风险管理', '采购管理', '干系人管理',
+  '敏捷/混合方法', '商业环境', '领导力/人员',
+];
+
+const CHAPTER_AREA_ALIASES: Record<string, string> = {
+  项目整合管理: '整合管理',
+  项目范围管理: '范围管理',
+  项目进度管理: '进度管理',
+  项目成本管理: '成本管理',
+  项目质量管理: '质量管理',
+  项目资源管理: '资源管理',
+  项目沟通管理: '沟通管理',
+  项目风险管理: '风险管理',
+  项目采购管理: '采购管理',
+  项目干系人管理: '干系人管理',
+  整合: '整合管理',
+  范围: '范围管理',
+  进度: '进度管理',
+  成本: '成本管理',
+  质量: '质量管理',
+  资源: '资源管理',
+  沟通: '沟通管理',
+  风险: '风险管理',
+  采购: '采购管理',
+  干系人: '干系人管理',
+  敏捷: '敏捷/混合方法',
+  商业: '商业环境',
+};
+
+const CHAPTER_PRACTICE_TRIGGERS = [
+  /章节练习/,
+  /练习统计/,
+  /录入章节/,
+  /章节刷题/,
 ];
 
 const REVIEW_TRIGGERS = [
@@ -620,6 +666,26 @@ export function routeAthenaMessage(
   const trimmed = text.trim().replace(/[\u200b\uFEFF]/g, '');
   if (!trimmed) return { handled: false };
 
+  // 章节练习：先发统计图、后补章节名
+  const pendingChapter = extractChapterFromCaption(trimmed);
+  if (pendingChapter && !shouldRouteScreenshotError(trimmed, false)) {
+    const pendingResult = routeChapterPracticePending(pendingChapter, config);
+    if (pendingResult.handled) {
+      return pendingResult;
+    }
+  }
+
+  // 纯题干截图：用户补充「我选 X」（不与每日一练/复习抢答）
+  if (
+    hasPendingPlainQuestion(config) &&
+    session.athena?.mode !== 'review' &&
+    session.athena?.mode !== 'daily' &&
+    !hasActiveDailyPractice(config) &&
+    isPlainFollowupText(trimmed)
+  ) {
+    return routePlainQuestionFollowup(trimmed, config);
+  }
+
   // 重做/再刷已完成日期：再刷30、重做7月30
   const redoPrefix = trimmed.match(REDO_DAILY_PREFIX);
   const redoSuffix = trimmed.match(REDO_DAILY_SUFFIX);
@@ -707,13 +773,329 @@ export function routeAthenaMessage(
   return { handled: false };
 }
 
-/** 是否应走截图录入错题硬路由 */
+/** 是否应走截图录入错题硬路由（配文触发 或 图中 OCR 含作答结果） */
 export function shouldRouteScreenshotError(userText: string, hasImage: boolean): boolean {
   if (!hasImage) return false;
   const t = userText.trim().replace(/[\u200b\uFEFF]/g, '');
-  if (!t || t === '(图片)') return true;
-  if (SCREENSHOT_ERROR_TRIGGERS.some((re) => re.test(t))) return true;
-  return false;
+  if (!t) return false;
+  return SCREENSHOT_ERROR_TRIGGERS.some((re) => re.test(t));
+}
+
+/** 从配文提取章节/知识领域名 */
+export function extractChapterFromCaption(userText: string): string | null {
+  const t = userText.trim().replace(/[\u200b\uFEFF]/g, '');
+  if (!t) return null;
+  const sorted = Object.entries(CHAPTER_AREA_ALIASES).sort((a, b) => b[0].length - a[0].length);
+  for (const [alias, area] of sorted) {
+    if (t.includes(alias)) return area;
+  }
+  for (const area of KNOWLEDGE_AREA_NAMES) {
+    if (t.includes(area)) return area;
+  }
+  return null;
+}
+
+/** 发章节练习统计截图 + 指定章节名 */
+export function shouldRouteChapterPractice(userText: string, hasImage: boolean): boolean {
+  if (!hasImage) return false;
+  if (shouldRouteScreenshotError(userText, true)) return false;
+  const chapter = extractChapterFromCaption(userText);
+  if (!chapter) return false;
+  const t = userText.trim();
+  if (CHAPTER_PRACTICE_TRIGGERS.some((re) => re.test(t))) return true;
+  // 配文仅含章节名或很短说明（如「范围管理」）
+  const stripped = t.replace(/章节练习|练习统计|录入|截图/g, '').trim();
+  return stripped.length <= 20;
+}
+
+/** 保存章节练习 pending（缺章节名） */
+export function saveChapterPracticePending(
+  imagePath: string,
+  config: Config,
+): void {
+  runPythonScript(config, 'chapter_practice_recorder.py', [
+    'save-pending', '--image', imagePath, '--json',
+  ]);
+}
+
+/** 用 pending 截图 + 用户补充的章节名入库 */
+export function routeChapterPracticePending(
+  chapter: string,
+  config: Config,
+): AthenaRouteResult {
+  const { ok, stdout } = runPythonScript(config, 'chapter_practice_recorder.py', [
+    'record-pending', '--chapter', chapter, '--json',
+  ]);
+  if (!ok) {
+    return { handled: true, reply: '⚠️ 章节练习录入失败，请重试。' };
+  }
+  const data = parseJson<{ success?: boolean; message?: string; error?: string }>(stdout);
+  if (data?.success && data.message) {
+    return { handled: true, reply: data.message };
+  }
+  if (data?.error === 'no_pending') {
+    return { handled: false };
+  }
+  return { handled: true, reply: data?.error || '⚠️ 录入未完成' };
+}
+
+/** 章节练习统计截图 → exam_records.json */
+export function preflightChapterPractice(
+  imagePath: string,
+  config: Config,
+): { isStats: boolean; chapter?: string } | null {
+  const { ok, stdout } = runPythonScript(config, 'chapter_practice_recorder.py', [
+    'preflight',
+    '--image', imagePath,
+    '--json',
+  ]);
+  if (!ok) return null;
+  const data = parseJson<{ is_stats?: boolean; chapter?: string | null }>(stdout);
+  if (!data) return null;
+  return {
+    isStats: !!data.is_stats,
+    chapter: data.chapter || undefined,
+  };
+}
+
+/** 章节练习统计截图 → exam_records.json */
+export function routeChapterPractice(
+  imagePath: string,
+  config: Config,
+  chapter: string,
+  userCaption?: string,
+): AthenaRouteResult {
+  logger.info('Athena hard route: chapter practice record', { imagePath, chapter });
+
+  const args = [
+    'record',
+    '--image', imagePath,
+    '--chapter', chapter,
+    '--json',
+  ];
+  const cap = (userCaption || '').trim();
+  if (cap) args.splice(args.length - 1, 0, '--caption', cap);
+
+  const { ok, stdout, stderr } = runPythonScript(config, 'chapter_practice_recorder.py', args);
+
+  if (!ok) {
+    logger.error('chapter practice record failed', { stderr, chapter });
+    return {
+      handled: true,
+      reply: '⚠️ 章节练习录入失败，请稍后重试。',
+    };
+  }
+
+  const data = parseJson<{
+    success?: boolean;
+    message?: string;
+    error?: string;
+    hint?: string;
+    ocr_preview?: string;
+  }>(stdout);
+
+  if (data?.success && data.message) {
+    return { handled: true, reply: data.message };
+  }
+
+  const lines = ['⚠️ 章节练习录入未完成。'];
+  if (data?.error) lines.push(data.error);
+  if (data?.hint) lines.push(data.hint);
+  if (data?.ocr_preview) lines.push(`OCR 预览: ${data.ocr_preview.slice(0, 80)}…`);
+  return { handled: true, reply: lines.join('\n') };
+}
+
+interface PreflightScreenshotResult {
+  screenshotType: 'error_result' | 'plain_question' | 'unknown';
+  formattedQuestion?: string;
+}
+
+interface PlainFollowupResult {
+  status: string;
+  error_log_id?: number;
+  my_answer?: string;
+  correct_answer?: string;
+  knowledge_area?: string;
+  question_preview?: string;
+  need?: string;
+  error_is_new?: boolean;
+  bank_id?: number;
+}
+
+const PLAIN_MY_ANSWER_TRIGGERS = [
+  /我[的]?选/,
+  /我的答案/,
+  /选了\s*[A-Ea-e]/,
+  /选错/,
+  /[A-Ea-e]\s*错了/,
+  /正确(?:答案)?[是为：:\s]*[A-Ea-e]/,
+];
+
+/** OCR 预检：区分「作答结果截图」vs「纯题干截图」 */
+export function preflightScreenshot(
+  imagePath: string,
+  config: Config,
+): PreflightScreenshotResult | null {
+  const { ok, stdout } = runPythonScript(config, 'image_processor.py', [
+    imagePath,
+    '--json',
+    '--no-auto-log',
+  ]);
+
+  if (!ok) return null;
+
+  const raw = parseJson<{
+    answer_validation?: {
+      screenshot_type?: string;
+      formatted_question?: string;
+    };
+  }>(stdout);
+
+  const v = raw?.answer_validation;
+  const t = v?.screenshot_type || 'unknown';
+  const screenshotType =
+    t === 'error_result' || t === 'plain_question' ? t : 'unknown';
+
+  return {
+    screenshotType,
+    formattedQuestion: v?.formatted_question,
+  };
+}
+
+function parsePlainMyAnswerHint(text: string): string | undefined {
+  const t = text.trim().replace(/[\u200b\uFEFF]/g, '');
+  if (!t) return undefined;
+  const patterns = [
+    /我[的]?选(?:了|错)?[是为：:\s]*([A-Ea-e])/i,
+    /我的答案[是为：:\s]*([A-Ea-e])/i,
+    /^([A-Ea-e])$/i,
+  ];
+  for (const re of patterns) {
+    const m = t.match(re);
+    if (m) return m[1].toUpperCase();
+  }
+  return undefined;
+}
+
+function isPlainFollowupText(text: string): boolean {
+  const t = text.trim();
+  if (!t) return false;
+  if (PLAIN_MY_ANSWER_TRIGGERS.some((re) => re.test(t))) return true;
+  return ANSWER_PATTERN.test(t);
+}
+
+function formatPlainFollowupReply(data: PlainFollowupResult): string {
+  if (data.status === 'logged' && data.error_log_id) {
+    const q = data.question_preview || '（题干）';
+    const suffix = q.length >= 60 ? '…' : '';
+    return [
+      `✅ 已录入错题 #${data.error_log_id} [${data.knowledge_area || '综合'}]`,
+      `📝 题干: ${q}${suffix}`,
+      `❌ 你的答案: ${data.my_answer || '?'} → ✅ 正确答案: ${data.correct_answer || '?'}`,
+      '💾 已同步 question_bank.json + error_review_state.json',
+    ].join('\n');
+  }
+  if (data.status === 'correct') {
+    return `✅ 你选的 ${data.my_answer} 正确，无需录入错题。`;
+  }
+  if (data.status === 'waiting' && data.need === 'correct_answer') {
+    return `📌 已记录你的答案 ${data.my_answer}，等我给出解析后会自动入库（若答错）。`;
+  }
+  if (data.status === 'no_pending') {
+    return '';
+  }
+  return '';
+}
+
+/** 是否存在待处理的纯题干截图 */
+export function hasPendingPlainQuestion(config: Config): boolean {
+  const { ok, stdout } = runPythonScript(config, 'plain_question_store.py', [
+    'status',
+    '--json',
+  ]);
+  if (!ok) return false;
+  const data = parseJson<{ status?: string }>(stdout);
+  return data?.status === 'pending';
+}
+
+/** 纯题干截图 OCR 后写入 pending（可选从配文提取 my_answer） */
+export function savePendingPlainFromImage(
+  imagePath: string,
+  config: Config,
+  userCaption?: string,
+): { saved: boolean; screenshotType?: string } {
+  const myHint = parsePlainMyAnswerHint(userCaption || '');
+  const args = ['save-from-image', imagePath];
+  if (myHint) args.push('--my-answer', myHint);
+  args.push('--json');
+
+  const { ok, stdout } = runPythonScript(config, 'plain_question_store.py', args);
+  if (!ok) return { saved: false };
+
+  const data = parseJson<{ status?: string; screenshot_type?: string }>(stdout);
+  if (data?.status === 'saved') return { saved: true, screenshotType: 'plain_question' };
+  if (data?.status === 'not_plain_question') {
+    return { saved: false, screenshotType: data.screenshot_type || 'unknown' };
+  }
+  return { saved: false };
+}
+
+/** 用户补充「我选 X」后尝试入库 */
+export function routePlainQuestionFollowup(
+  text: string,
+  config: Config,
+): AthenaRouteResult {
+  logger.info('Athena hard route: plain question followup', { text });
+
+  const { ok, stdout, stderr } = runPythonScript(config, 'plain_question_store.py', [
+    'followup',
+    '--text',
+    text,
+    '--json',
+  ]);
+
+  if (!ok) {
+    logger.error('plain question followup failed', { stderr });
+    return { handled: true, reply: '⚠️ 处理失败，请重试。' };
+  }
+
+  const data = parseJson<PlainFollowupResult>(stdout);
+  if (!data) {
+    return { handled: true, reply: stdout || '⚠️ 无法解析结果' };
+  }
+
+  if (data.status === 'no_pending') {
+    return { handled: false };
+  }
+
+  const reply = formatPlainFollowupReply(data);
+  if (data.status === 'waiting') {
+    return { handled: !!reply, reply: reply || undefined };
+  }
+
+  return { handled: true, reply: reply || '✅ 已处理。' };
+}
+
+/** Claude 给出解析后提取标准答案，若用户已报选错则自动入库 */
+export function applyPlainQuestionAfterParse(
+  claudeText: string,
+  config: Config,
+): string | null {
+  const { ok, stdout } = runPythonScript(config, 'plain_question_store.py', [
+    'apply-parse',
+    '--text',
+    claudeText,
+    '--json',
+  ]);
+  if (!ok) return null;
+
+  const data = parseJson<PlainFollowupResult>(stdout);
+  if (!data || data.status === 'no_pending' || data.status === 'no_answer_in_text') {
+    return null;
+  }
+
+  const reply = formatPlainFollowupReply(data);
+  return reply || null;
 }
 
 function formatScreenshotLogReply(data: ScreenshotLogResult): string {
@@ -766,13 +1148,17 @@ function formatScreenshotLogReply(data: ScreenshotLogResult): string {
 export function routeScreenshotError(
   imagePath: string,
   config: Config,
+  userCaption?: string,
 ): AthenaRouteResult {
-  logger.info('Athena hard route: screenshot error log', { imagePath });
+  logger.info('Athena hard route: screenshot error log', { imagePath, userCaption });
 
-  const { ok, stdout, stderr } = runPythonScript(config, 'image_processor.py', [
-    imagePath,
-    '--json',
-  ]);
+  const args = [imagePath, '--json'];
+  const caption = (userCaption || '').trim().replace(/[\u200b\uFEFF]/g, '');
+  if (caption) {
+    args.push('--caption', caption);
+  }
+
+  const { ok, stdout, stderr } = runPythonScript(config, 'image_processor.py', args);
 
   if (!ok) {
     logger.error('screenshot error log failed', { stderr, imagePath });
@@ -817,4 +1203,56 @@ export function routeScreenshotError(
   };
 
   return { handled: true, reply: formatScreenshotLogReply(data) };
+}
+
+/** 多图 OCR + 语义合并 + 关联入库 */
+export function routeMultiScreenshotError(
+  imagePaths: string[],
+  config: Config,
+  userCaption?: string,
+): AthenaRouteResult {
+  logger.info('Athena hard route: multi screenshot error log', {
+    count: imagePaths.length,
+    userCaption,
+  });
+
+  const args = [...imagePaths];
+  const caption = (userCaption || '').trim().replace(/[\u200b\uFEFF]/g, '');
+  if (caption) {
+    args.push('--caption', caption);
+  }
+  args.push('--json');
+
+  const { ok, stdout, stderr } = runPythonScript(
+    config,
+    'multi_screenshot_merge.py',
+    args,
+  );
+
+  if (!ok) {
+    logger.error('multi screenshot merge failed', { stderr, count: imagePaths.length });
+    return {
+      handled: true,
+      reply: '⚠️ 多图识别失败，请稍后重试，或分条发送「我的答案 X，正确答案 Y」。',
+    };
+  }
+
+  const data = parseJson<{
+    status?: string;
+    message?: string;
+    error?: string;
+  }>(stdout);
+
+  if (!data) {
+    return { handled: true, reply: stdout || '⚠️ 无法解析多图处理结果' };
+  }
+
+  if (data.message) {
+    return { handled: true, reply: data.message };
+  }
+
+  return {
+    handled: true,
+    reply: data.error || '⚠️ 多图处理未完成，请确认题目与解析是否对应同一题。',
+  };
 }

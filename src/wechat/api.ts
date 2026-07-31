@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import type {
   GetUpdatesResp,
   SendMessageReq,
@@ -9,9 +10,7 @@ import { logger } from '../logger.js';
 
 /** Generate a random base64 identifier. */
 function generateUin(): string {
-  const buf = new Uint8Array(4);
-  crypto.getRandomValues(buf);
-  return Buffer.from(buf).toString('base64');
+  return randomBytes(4).toString('base64');
 }
 
 export class WeChatApi {
