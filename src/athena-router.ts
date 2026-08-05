@@ -132,12 +132,16 @@ const CHAPTER_PRACTICE_TRIGGERS = [
 ];
 
 const REVIEW_TRIGGERS = [
-  /^复习错题$/,
-  /^今日复习错题$/,
-  /^今天错题复习$/,
-  /^今日错题复习$/,
-  /^今天复习什么$/,
+  /复习错题/,
+  /今日复习错题/,
+  /今天错题复习/,
+  /今日错题复习/,
+  /今天复习什么/,
+  /回顾错题/,
+  /错题回顾/,
+  /错题复习/,
   /^\/review$/,
+  /开始复习/,
 ];
 
 const WEAKNESS_TRIGGERS = [
@@ -156,6 +160,23 @@ const FREQUENT_ERROR_TRIGGERS = [
   /^错题高频$/,
   /^高频错误$/,
 ];
+
+/** 知识点速查：X知识点 / 知识点 X / 总结X / X速查 / 考点 X 等 */
+function isKnowledgeSummaryQuery(text: string): boolean {
+  const t = text.trim();
+  if (t.length < 3) return false;
+  if (/^知识点\s*.+/.test(t)) return true;
+  if (/知识点$/.test(t)) return true;
+  if (/^详细知识点\s*.+/.test(t)) return true;
+  if (/^总结.{2,}$/.test(t)) return true;
+  if (/.{2,}总结$/.test(t)) return true;
+  if (/^考点\s*.+/.test(t)) return true;
+  if (/考点$/.test(t)) return true;
+  if (/有哪些考点$/.test(t)) return true;
+  if (/有哪些要点$/.test(t)) return true;
+  if (/速查$/.test(t)) return true;
+  return false;
+}
 
 const DAILY_TRIGGERS = [
   /^每日一练$/,
@@ -204,8 +225,40 @@ const REDO_DAILY_PREFIX = /^(?:再刷|重做)\s*(.+)$/;
 const REDO_DAILY_SUFFIX = /^(.+?)(?:再刷|重做)$/;
 
 const ANSWER_PATTERN = /^[A-Da-d]$/;
-const MULTI_ANSWER_PATTERN = /^[A-Ea-e]{2,5}$/;
-const DAILY_ANSWER_PATTERN = /^[A-Ea-e]{1,5}$/;
+const MULTI_ANSWER_PATTERN = /^[A-Ea-e]{2,10}$/;
+const DAILY_ANSWER_PATTERN = /^[A-Ea-e]{1,10}$/;
+
+/** 从长文本提取「我的答案是A / 我的答案是：ACCAB」（不匹配逐题「答案：C」） */
+const EMBEDDED_ANSWER_RES: RegExp[] = [
+  /(?:我的答案(?:是)?|我选(?:了)?)[：:\s]*([A-Ea-e]{1,10})\s*$/im,
+];
+
+export function extractEmbeddedDailyAnswer(text: string): string | null {
+  const trimmed = text.trim().replace(/[\u200b\uFEFF]/g, '');
+  for (const re of EMBEDDED_ANSWER_RES) {
+    const m = trimmed.match(re);
+    if (m?.[1] && /^[A-Ea-e]+$/i.test(m[1])) {
+      return m[1].toUpperCase();
+    }
+  }
+  return null;
+}
+
+function extractMyAnswerOnly(text: string): string | null {
+  const trimmed = text.trim().replace(/[\u200b\uFEFF]/g, '');
+  const embedded = extractEmbeddedDailyAnswer(trimmed);
+  if (embedded) return embedded;
+  if (/^[A-Ea-e]$/.test(trimmed)) return trimmed.toUpperCase();
+  return null;
+}
+
+function resolveDailyAnswer(text: string): string | null {
+  const trimmed = text.trim().replace(/[\u200b\uFEFF]/g, '');
+  if (ANSWER_PATTERN.test(trimmed) || DAILY_ANSWER_PATTERN.test(trimmed)) {
+    return trimmed.toUpperCase();
+  }
+  return extractEmbeddedDailyAnswer(trimmed);
+}
 
 /** 文件态：Python 侧 daily_practice_state.json 仍有进行中的练习 */
 function hasActiveDailyPractice(config: Config): boolean {
@@ -245,6 +298,13 @@ export function isLikelyAthenaCommand(text: string): boolean {
   const trimmed = text.trim().replace(/[\u200b\uFEFF]/g, '');
   if (!trimmed || trimmed.startsWith('/')) return false;
   if (ANSWER_PATTERN.test(trimmed) || MULTI_ANSWER_PATTERN.test(trimmed)) return true;
+  if (extractEmbeddedDailyAnswer(trimmed)) return true;
+  if (BATCH_UPDATE_TRIGGER.test(trimmed) && /正确答案/i.test(trimmed)) return true;
+  if (isInlineGradeText(trimmed)) return true;
+  if (isExplainRequest(trimmed)) return true;
+  if (isBreakfastPracticeInput(trimmed)) return true;
+  if (isBatchPracticeInput(trimmed)) return true;
+  if (extractMyAnswerOnly(trimmed) && !/(?:^|\n)\d+[\.．、]/m.test(trimmed)) return true;
   if (REVIEW_TRIGGERS.some((re) => re.test(trimmed))) return true;
   if (WEAKNESS_TRIGGERS.some((re) => re.test(trimmed))) return true;
   if (FREQUENT_ERROR_TRIGGERS.some((re) => re.test(trimmed))) return true;
@@ -252,6 +312,8 @@ export function isLikelyAthenaCommand(text: string): boolean {
   if (RANDOM_DAILY_TRIGGERS.some((re) => re.test(trimmed))) return true;
   if (REDO_DAILY_PREFIX.test(trimmed) || REDO_DAILY_SUFFIX.test(trimmed)) return true;
   if (isPracticeSummaryQuery(trimmed)) return true;
+  if (isKnowledgeSummaryQuery(trimmed)) return true;
+  if (/^(详细|展开|套路|情景|关联)\s*/.test(trimmed)) return true;
   if (looksLikeDailyDate(trimmed)) return true;
   return false;
 }
@@ -260,6 +322,7 @@ function runPythonScript(
   config: Config,
   scriptName: string,
   args: string[],
+  stdin?: string,
 ): { ok: boolean; stdout: string; stderr: string } {
   const pythonBin = config.pythonBin || 'python';
   const cwd = config.workingDirectory;
@@ -269,6 +332,7 @@ function runPythonScript(
     cwd,
     encoding: 'utf-8',
     timeout: 120_000,
+    input: stdin,
     env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
   });
 
@@ -277,6 +341,167 @@ function runPythonScript(
     stdout: (result.stdout || '').trim(),
     stderr: (result.stderr || '').trim(),
   };
+}
+
+/** App 刷题：1、/41. 题干 + 选项（≥1 题） */
+function isAppQuestionFormat(text: string): boolean {
+  const trimmed = text.trim();
+  return /(?:^|\n)\d+[\.．、]\s*\S/m.test(trimmed) && /(?:^|\n)[A-D][、\.．:：]/im.test(trimmed);
+}
+
+/** App 刷题：多题 + 我的答案是 */
+function isBatchPracticeInput(text: string): boolean {
+  const trimmed = text.trim();
+  if (!isAppQuestionFormat(trimmed)) return false;
+  const blocks = trimmed.match(/(?:^|\n)\d+[\.．、]\s*/gm);
+  if (!blocks || blocks.length < 1) return false;
+  if (extractEmbeddedDailyAnswer(trimmed)) return true;
+  // 仅题干+选项（待跟答）
+  return blocks.length >= 1 && /(?:^|\n)[A-D][、\.．:：]/im.test(trimmed);
+}
+
+/** 早餐题：逐题含 答案：X 或 【解析】 */
+function isBreakfastPracticeInput(text: string): boolean {
+  const trimmed = text.replace(/^(?:早餐题|早题)[：:\s]*/i, '').trim();
+  const qBlocks = trimmed.match(/(?:^|\n)\d+[\.．、]\s*/gm);
+  const ansBlocks = trimmed.match(/(?:^|\n)(?:\d+[、.]?\s*)?答案[：:\s]*[A-E]\s*$/gim);
+  const explBlocks = trimmed.match(/【解析】/g);
+  return (
+    (qBlocks?.length ?? 0) >= 1 &&
+    ((ansBlocks?.length ?? 0) >= 1 || (explBlocks?.length ?? 0) >= 1)
+  );
+}
+
+function hasPendingBatchQuestions(config: Config): boolean {
+  const statePath = join(config.workingDirectory, 'pmp_notes', 'batch_practice_state.json');
+  if (!existsSync(statePath)) return false;
+  try {
+    const data = JSON.parse(readFileSync(statePath, 'utf8')) as {
+      pending_questions?: unknown[];
+      by_num?: Record<string, { correct_answer?: string; pending?: boolean; bank_id?: number | null; my_answer?: string; question?: string }>;
+    };
+    if ((data.pending_questions?.length ?? 0) >= 1) return true;
+    const waiting = Object.values(data.by_num ?? {}).filter(
+      (v) => v.question && (!v.correct_answer || (v.my_answer && v.pending && !v.bank_id)),
+    );
+    return waiting.length >= 1;
+  } catch {
+    return false;
+  }
+}
+
+function isBatchAnswerFollowup(text: string, config: Config): boolean {
+  const trimmed = text.trim();
+  if (!extractMyAnswerOnly(trimmed)) return false;
+  if (/(?:^|\n)\d+[\.．、]/m.test(trimmed)) return false;
+  if (/(?:^|\n)[A-D][、\.．:：]/im.test(trimmed)) return false;
+  return hasPendingBatchQuestions(config);
+}
+
+const BATCH_UPDATE_TRIGGER = /更新\s*#?\d+\s*题/i;
+
+const EXPLAIN_REQUEST = /^(?:给我|帮我)?(?:解析|解释|讲解)(?:一下|下|这题|这道题)?[。.!！?？]*$/i;
+
+function isInlineGradeText(text: string): boolean {
+  const t = text.trim();
+  return /我的答案|我选/i.test(t) && /正确(?:答案)?[是为：:\s]*[A-Ea-e]/i.test(t);
+}
+
+function isExplainRequest(text: string): boolean {
+  return EXPLAIN_REQUEST.test(text.trim());
+}
+
+function routeBatchExplain(config: Config): AthenaRouteResult {
+  const { ok, stdout, stderr } = runPythonScript(config, 'daily_practice.py', [
+    'batch-explain',
+    '--json',
+  ]);
+  if (!ok) {
+    return { handled: true, reply: `⚠️ 解析失败\n${stderr || stdout}` };
+  }
+  try {
+    const data = JSON.parse(stdout) as { status: string; text: string };
+    return { handled: true, reply: data.text || stdout };
+  } catch {
+    return { handled: true, reply: stdout || '⚠️ 解析无输出' };
+  }
+}
+
+function routeBatchPractice(config: Config, text: string): AthenaRouteResult {
+  const { ok, stdout, stderr } = runPythonScript(
+    config,
+    'daily_practice.py',
+    ['batch', '--stdin', '--json'],
+    text,
+  );
+  if (!ok) {
+    return { handled: true, reply: `⚠️ 批量收录失败\n${stderr || stdout}` };
+  }
+  try {
+    const data = JSON.parse(stdout) as { status: string; text: string };
+    return { handled: true, reply: data.text || stdout };
+  } catch {
+    return { handled: true, reply: stdout || '⚠️ 批量收录无输出' };
+  }
+}
+
+function routeBatchUpdateText(config: Config, text: string): AthenaRouteResult {
+  const { ok, stdout, stderr } = runPythonScript(
+    config,
+    'daily_practice.py',
+    ['batch-update-text', '--stdin', '--json'],
+    text,
+  );
+  if (!ok) {
+    return { handled: true, reply: `⚠️ 补录失败\n${stderr || stdout}` };
+  }
+  try {
+    const data = JSON.parse(stdout) as { status: string; text: string };
+    return { handled: true, reply: data.text || stdout };
+  } catch {
+    return { handled: true, reply: stdout || '⚠️ 补录无输出' };
+  }
+}
+
+function runDynamicKnowledge(config: Config, text: string): AthenaRouteResult {
+  const { ok, stdout, stderr } = runPythonScript(config, 'dynamic_knowledge.py', [
+    'message',
+    '--text',
+    text,
+    '--json',
+  ]);
+  if (!ok) {
+    logger.error('dynamic knowledge failed', { stderr });
+    return { handled: true, reply: `⚠️ 知识检索失败\n${stderr || stdout}` };
+  }
+  try {
+    const data = JSON.parse(stdout) as { status: string; text?: string };
+    if (data.status === 'skip') {
+      return { handled: false };
+    }
+    return { handled: true, reply: data.text || stdout };
+  } catch {
+    return { handled: false };
+  }
+}
+
+function runKnowledgeSummary(config: Config, text: string): AthenaRouteResult {
+  const { ok, stdout, stderr } = runPythonScript(config, 'knowledge_retriever.py', [
+    'retrieve',
+    '--text',
+    text,
+    '--json',
+  ]);
+  if (!ok) {
+    logger.error('knowledge retriever failed', { stderr });
+    return { handled: true, reply: `⚠️ 知识点检索失败\n${stderr || stdout}` };
+  }
+  try {
+    const data = JSON.parse(stdout) as { status: string; text: string };
+    return { handled: true, reply: data.text || stdout };
+  } catch {
+    return { handled: true, reply: stdout || '⚠️ 知识点总结无输出' };
+  }
 }
 
 function runStudyAdvisor(config: Config, args: string[]) {
@@ -675,6 +900,32 @@ export function routeAthenaMessage(
     }
   }
 
+  // 解析请求：给我解析一下
+  if (
+    isExplainRequest(trimmed) &&
+    session.athena?.mode !== 'review' &&
+    session.athena?.mode !== 'daily' &&
+    !hasActiveDailyPractice(config)
+  ) {
+    logger.info('Athena hard route: batch explain', { text: trimmed });
+    return routeBatchExplain(config);
+  }
+
+  // 同时给出我的答案+正确答案（截图跟答 / App 单题判卷）
+  if (
+    isInlineGradeText(trimmed) &&
+    session.athena?.mode !== 'review' &&
+    session.athena?.mode !== 'daily' &&
+    !hasActiveDailyPractice(config)
+  ) {
+    if (hasPendingPlainQuestion(config)) {
+      const plainResult = routePlainQuestionFollowup(trimmed, config);
+      if (plainResult.handled) return plainResult;
+    }
+    logger.info('Athena hard route: inline grade', { text: trimmed });
+    return routeBatchPractice(config, trimmed);
+  }
+
   // 纯题干截图：用户补充「我选 X」（不与每日一练/复习抢答）
   if (
     hasPendingPlainQuestion(config) &&
@@ -701,20 +952,79 @@ export function routeAthenaMessage(
     return runPracticeSummary(config, trimmed);
   }
 
-  // 每日一练判卷：会话态 daily，或 Python 文件态仍有进行中的练习
-  if (ANSWER_PATTERN.test(trimmed) || DAILY_ANSWER_PATTERN.test(trimmed)) {
-    if (session.athena?.mode === 'daily' || hasActiveDailyPractice(config)) {
-      return gradeDailyAnswer(config, session, trimmed);
-    }
-  }
-
-  // 复习模式下的单字母判卷
+  // ── 错题复习：单字母判卷（优先于 batch practice 和 daily）──
   if (
     session.athena?.mode === 'review' &&
-    session.athena.currentErrorId &&
-    ANSWER_PATTERN.test(trimmed)
+    session.athena.currentErrorId != null &&
+    (ANSWER_PATTERN.test(trimmed) || MULTI_ANSWER_PATTERN.test(trimmed))
   ) {
     return gradeReviewAnswer(config, session, trimmed);
+  }
+
+  // ── 启动复习（优先于 batch practice 和 daily）──
+  if (REVIEW_TRIGGERS.some((re) => re.test(trimmed))) {
+    logger.info('Athena hard route: start review', { text: trimmed });
+    return startReview(config);
+  }
+
+  // App 批量题补录标准答案
+  if (BATCH_UPDATE_TRIGGER.test(trimmed) && /正确答案/i.test(trimmed)) {
+    logger.info('Athena hard route: batch update', { text: trimmed.slice(0, 80) });
+    return routeBatchUpdateText(config, trimmed);
+  }
+
+  // App 批量题补录标准答案：已有 pending 题目 + 文本含「答案：X」
+  // 绕过 daily/active 限制，让 Python batch_ingest 处理（parse_breakfast_questions → _batch_ingest_with_solutions）
+  if (
+    (isBreakfastPracticeInput(trimmed) || isBatchPracticeInput(trimmed)) &&
+    hasPendingBatchQuestions(config) &&
+    /答案[：:\s]*[A-E]/i.test(trimmed)
+  ) {
+    logger.info('Athena hard route: batch practice (pending answer fill, bypass daily check)', { text: trimmed.slice(0, 80) });
+    return routeBatchPractice(config, trimmed);
+  }
+
+  // App 批量题：早餐题 / 多题+答案串（非每日一练进行中时优先）
+  if (
+    (isBreakfastPracticeInput(trimmed) || isBatchPracticeInput(trimmed)) &&
+    session.athena?.mode !== 'daily' &&
+    !hasActiveDailyPractice(config)
+  ) {
+    logger.info('Athena hard route: batch practice ingest', { text: trimmed.slice(0, 80) });
+    return routeBatchPractice(config, trimmed);
+  }
+
+  // App 跟答：我的答案是A / 我选B（已有 pending 题目）
+  if (
+    isBatchAnswerFollowup(trimmed, config) &&
+    session.athena?.mode !== 'daily' &&
+    !hasActiveDailyPractice(config)
+  ) {
+    logger.info('Athena hard route: batch answer followup', { text: trimmed });
+    return routeBatchPractice(config, trimmed);
+  }
+
+  // 每日一练判卷：纯答案、嵌入答案（我的答案是：ACCAB）、或进行中的练习
+  const dailyAnswer = resolveDailyAnswer(trimmed);
+  if (dailyAnswer) {
+    if (session.athena?.mode === 'daily' || hasActiveDailyPractice(config)) {
+      return gradeDailyAnswer(config, session, dailyAnswer);
+    }
+    if (/我的答案|我选/.test(trimmed)) {
+      logger.info('Athena hard route: app answer without daily session', { dailyAnswer });
+      return routeBatchPractice(config, trimmed);
+    }
+    logger.info('Athena: embedded daily answer but no active session', { dailyAnswer });
+    const hint = isAppQuestionFormat(trimmed)
+      ? ''
+      : '\n💡 App 刷题：先发题干+选项，再回「我的答案是 A」；或一并发「我的答案是：A」。';
+    return {
+      handled: true,
+      reply:
+        `📌 已识别答案 ${dailyAnswer}，但当前没有进行中的每日一练。` +
+        hint +
+        '\n请先发送「做7月31日每日一练」或「每日一练」开始，再提交答案。',
+    };
   }
 
   // 日期选择模式（菜单后回复日期）
@@ -722,9 +1032,25 @@ export function routeAthenaMessage(
     return resolveAndStartDaily(config, trimmed);
   }
 
-  // 启动复习
-  if (REVIEW_TRIGGERS.some((re) => re.test(trimmed))) {
-    return startReview(config);
+  // 动态知识查询：挣值 / 详细 挣值 / 套路 变更（本地索引，秒回）
+  if (
+    /^(详细|展开|套路|情景|关联)\s*/.test(trimmed) ||
+    (/^[\u4e00-\u9fffA-Za-z/]{2,16}$/.test(trimmed) &&
+      !REVIEW_TRIGGERS.some((re) => re.test(trimmed)) &&
+      !WEAKNESS_TRIGGERS.some((re) => re.test(trimmed)) &&
+      !DAILY_TRIGGERS.some((re) => re.test(trimmed)))
+  ) {
+    const dk = runDynamicKnowledge(config, trimmed);
+    if (dk.handled) {
+      logger.info('Athena hard route: dynamic knowledge', { text: trimmed });
+      return dk;
+    }
+  }
+
+  // 知识领域知识点速查（ChromaDB）
+  if (isKnowledgeSummaryQuery(trimmed)) {
+    logger.info('Athena hard route: knowledge retriever', { text: trimmed });
+    return runKnowledgeSummary(config, trimmed);
   }
 
   // 薄弱点分析
@@ -920,6 +1246,7 @@ interface PlainFollowupResult {
   need?: string;
   error_is_new?: boolean;
   bank_id?: number;
+  explain_text?: string;
 }
 
 const PLAIN_MY_ANSWER_TRIGGERS = [
@@ -985,6 +1312,7 @@ function isPlainFollowupText(text: string): boolean {
 }
 
 function formatPlainFollowupReply(data: PlainFollowupResult): string {
+  if (data.explain_text) return data.explain_text;
   if (data.status === 'logged' && data.error_log_id) {
     const q = data.question_preview || '（题干）';
     const suffix = q.length >= 60 ? '…' : '';

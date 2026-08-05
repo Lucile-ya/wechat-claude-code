@@ -360,6 +360,49 @@ function acquireBridgeSingletonLock(): void {
 // Daemon
 // ---------------------------------------------------------------------------
 
+// ── 全局错误兜底：防止未捕获异常直接杀死进程 ──────────────────────────
+let _crashCount = 0;
+let _crashWindowStart = 0;
+const CRASH_WINDOW_MS = 60_000;       // 1 分钟窗口
+const CRASH_THRESHOLD = 5;            // 窗口内崩溃 ≥ 5 次 → 主动退出让 daemon.sh 重启
+const CRASH_COOLDOWN_MS = 30_000;     // 连续崩溃间的静默期
+let _lastCrashTime = 0;
+
+function _recordCrash(): boolean {
+  const now = Date.now();
+  if (now - _lastCrashTime < CRASH_COOLDOWN_MS) {
+    // 距离上次崩溃太近 — 可能是同一个错误反复触发，不重复计数但仍检查阈值
+  }
+  _lastCrashTime = now;
+  if (now - _crashWindowStart > CRASH_WINDOW_MS) {
+    _crashCount = 0;
+    _crashWindowStart = now;
+  }
+  _crashCount++;
+  logger.error(`Crash #${_crashCount} in current window (threshold: ${CRASH_THRESHOLD})`);
+  if (_crashCount >= CRASH_THRESHOLD) {
+    logger.error('Crash threshold exceeded — exiting to let daemon restart loop recover');
+    return true; // caller should exit
+  }
+  return false;
+}
+
+process.on('uncaughtException', (err) => {
+  logger.error('Uncaught exception', { error: err.message, stack: err.stack?.slice(0, 500) });
+  if (_recordCrash()) {
+    process.exit(1);
+  }
+});
+
+process.on('unhandledRejection', (reason) => {
+  const msg = reason instanceof Error ? reason.message : String(reason);
+  const stack = reason instanceof Error ? reason.stack?.slice(0, 500) : undefined;
+  logger.error('Unhandled rejection', { reason: msg, stack });
+  if (_recordCrash()) {
+    process.exit(1);
+  }
+});
+
 async function runDaemon(): Promise<void> {
   acquireBridgeSingletonLock();
   const config = loadConfig();
@@ -404,7 +447,18 @@ async function runDaemon(): Promise<void> {
     processingQueue = true;
     while (messageQueue.length > 0) {
       const msg = messageQueue.shift()!;
-      await handleMessage(msg, account!, session, sessionStore, sender, config, sharedCtx, activeControllers, messageQueue, processedSeqs);
+      try {
+        await handleMessage(msg, account!, session, sessionStore, sender, config, sharedCtx, activeControllers, messageQueue, processedSeqs);
+      } catch (err) {
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        const stack = err instanceof Error ? err.stack?.slice(0, 500) : undefined;
+        logger.error('Unhandled error in message handler', { error: errorMsg, stack });
+        // Reset session state so future messages can still be processed
+        try {
+          session.state = 'idle';
+          sessionStore.save(account!.accountId, session);
+        } catch { /* ignore */ }
+      }
     }
     processingQueue = false;
   }
@@ -522,7 +576,8 @@ async function handleMessage(
   session.state = 'processing';
   sessionStore.save(account.accountId, session);
 
-  // Flush any pending messages from prior rate-limit windows. User's new
+  try {
+    // Flush any pending messages from prior rate-limit windows. User's new
   // message brings a fresh context_token, which resets the iLink 11-msg quota.
   await flushPending(account.accountId, fromUserId, contextToken, sender);
 
@@ -670,7 +725,19 @@ async function handleMessage(
       }
 
       if (preflight?.screenshotType === 'plain_question' && !explicitErrorLog) {
-        savePendingPlainFromImage(imagePath, config, userText);
+        const plainSaved = savePendingPlainFromImage(imagePath, config, userText);
+        if (plainSaved.saved) {
+          sessionStore.addChatMessage(session, 'user', userText || '(图片-题干截图)');
+          const plainReply =
+            '📌 题干已收录。\n请发「我的答案是X，正确答案是Y」完成判卷；或先发你选了哪个选项。';
+          sessionStore.addChatMessage(session, 'assistant', plainReply);
+          await sendReplyOrQueue(
+            account.accountId, fromUserId, contextToken, sender, plainReply,
+          );
+          session.state = 'idle';
+          sessionStore.save(account.accountId, session);
+          return;
+        }
       }
     }
   }
@@ -678,6 +745,15 @@ async function handleMessage(
   // -- PMP Athena hard routing (before Claude) --
 
   if (userText && !userText.startsWith('/')) {
+    // 硬路由 Athena 指令时中止进行中的 Claude，避免额外回复「👀」等
+    if (isLikelyAthenaCommand(userText)) {
+      const ctrl = activeControllers.get(account.accountId);
+      if (ctrl) {
+        ctrl.abort();
+        activeControllers.delete(account.accountId);
+      }
+    }
+
     // 从磁盘同步 athena 状态（/clear 后或重启后仍可按文件态判卷）
     const diskSession = sessionStore.load(account.accountId);
     session.athena = diskSession.athena;
@@ -732,6 +808,11 @@ async function handleMessage(
     userText, imageItem, fileItem, fromUserId, contextToken,
     account, session, sessionStore, sender, config, activeControllers,
   );
+  } finally {
+    // Always reset session state, even on unexpected errors
+    session.state = 'idle';
+    sessionStore.save(account!.accountId, session);
+  }
 }
 
 function extractTextFromItems(items: NonNullable<WeixinMessage['item_list']>): string {

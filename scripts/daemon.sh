@@ -215,6 +215,8 @@ linux_reload_daemon() {
 linux_direct_start() {
   local pid_file="$(linux_pid_file)"
   local node_bin="$(linux_node_bin)"
+  local restart_log="${DATA_DIR}/logs/restart.log"
+  local wrapper_script="${DATA_DIR}/restart-wrapper.sh"
 
   if [ -f "$pid_file" ]; then
     local old_pid=$(cat "$pid_file" 2>/dev/null)
@@ -227,15 +229,53 @@ linux_direct_start() {
 
   mkdir -p "$DATA_DIR/logs"
 
-  echo "Starting wechat-claude-code daemon (direct mode)..."
-  nohup "$node_bin" "${PROJECT_DIR}/dist/main.js" start \
-    >> "$DATA_DIR/logs/stdout.log" \
-    2>> "$DATA_DIR/logs/stderr.log" &
-  local pid=$!
-  echo "$pid" > "$pid_file"
-  echo "Started (PID: $pid)"
-  echo "Logs: $DATA_DIR/logs/stdout.log"
+  echo "Starting wechat-claude-code daemon (direct mode with auto-restart)..."
 
+  # Write a restart-wrapper script that auto-restarts the Node process on crash.
+  # Variables expanded at creation time: node_bin, PROJECT_DIR, DATA_DIR, restart_log.
+  # Escaped variables (\$VAR) are evaluated at runtime inside the wrapper.
+  cat > "$wrapper_script" <<WRAPPER_EOF
+#!/bin/bash
+RESTART_COUNT=0
+MAX_RAPID=5
+RAPID_WINDOW=60
+rapid_count=0
+rapid_start=0
+
+while true; do
+  ${node_bin} ${PROJECT_DIR}/dist/main.js start >> ${DATA_DIR}/logs/stdout.log 2>> ${DATA_DIR}/logs/stderr.log &
+  CHILD_PID=\$!
+  wait \$CHILD_PID 2>/dev/null
+  EXIT_CODE=\$?
+
+  NOW=\$(date +%s 2>/dev/null || echo 0)
+  if [ \$((NOW - rapid_start)) -gt \$RAPID_WINDOW ]; then
+    rapid_count=0
+    rapid_start=\$NOW
+  fi
+  rapid_count=\$((rapid_count + 1))
+  RESTART_COUNT=\$((RESTART_COUNT + 1))
+
+  echo "\$(date '+%Y-%m-%d %H:%M:%S'): exit=\$EXIT_CODE restarts=\$RESTART_COUNT rapid=\$rapid_count/\$MAX_RAPID" >> ${restart_log}
+
+  if [ \$rapid_count -ge \$MAX_RAPID ]; then
+    echo "\$(date '+%Y-%m-%d %H:%M:%S'): too many rapid restarts, pausing 60s..." >> ${restart_log}
+    sleep 60
+    rapid_count=0
+    rapid_start=\$(date +%s 2>/dev/null || echo 0)
+  else
+    sleep 5
+  fi
+done
+WRAPPER_EOF
+  chmod +x "$wrapper_script"
+
+  nohup "$wrapper_script" > /dev/null 2>&1 &
+  local wrapper_pid=$!
+  echo "$wrapper_pid" > "$pid_file"
+  echo "Started (wrapper PID: $wrapper_pid)"
+  echo "Logs: $DATA_DIR/logs/stdout.log"
+  echo "Restart log: $restart_log"
 }
 
 linux_direct_stop() {
@@ -254,6 +294,8 @@ linux_direct_stop() {
   fi
 
   if kill -0 "$pid" 2>/dev/null; then
+    # Kill child node processes first, then the wrapper itself
+    pkill -P "$pid" 2>/dev/null || true
     kill "$pid" 2>/dev/null || true
     local count=0
     while kill -0 "$pid" 2>/dev/null && [ $count -lt 10 ]; do
@@ -261,6 +303,8 @@ linux_direct_stop() {
       count=$((count + 1))
     done
     kill -9 "$pid" 2>/dev/null || true
+    # Clean up any lingering node processes
+    pkill -f "dist/main.js start" 2>/dev/null || true
     echo "Stopped (PID: $pid)"
   else
     echo "Process not running (cleaning up PID file)"
@@ -279,7 +323,12 @@ linux_direct_status() {
     if [ -z "$pid" ]; then
       echo "Daemon: Not running (invalid PID file)"
     elif kill -0 "$pid" 2>/dev/null; then
-      echo "Daemon: Running (PID: $pid)"
+      local node_pid=$(pgrep -P "$pid" -f "dist/main.js start" 2>/dev/null | head -1)
+      if [ -n "$node_pid" ]; then
+        echo "Daemon: Running (wrapper PID: $pid, node PID: $node_pid)"
+      else
+        echo "Daemon: Running (wrapper PID: $pid, node restarting...)"
+      fi
     else
       echo "Daemon: Not running (stale PID file)"
     fi
