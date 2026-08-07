@@ -301,6 +301,25 @@ function hasActiveDailyPractice(config: Config): boolean {
   }
 }
 
+function readMockExamState(config: Config): {
+  status?: string;
+  elapsed_seconds?: number;
+  current_batch?: number;
+  total_questions?: number;
+} | null {
+  const statePath = join(
+    config.workingDirectory,
+    'pmp_notes',
+    'mock_exam_state.json',
+  );
+  if (!existsSync(statePath)) return null;
+  try {
+    return JSON.parse(readFileSync(statePath, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
 function looksLikeDailyDate(text: string): boolean {
   return (
     STANDALONE_MD.test(text) ||
@@ -1047,6 +1066,23 @@ export function routeAthenaMessage(
 ): AthenaRouteResult {
   const trimmed = text.trim().replace(/[\u200b\uFEFF]/g, '');
   if (!trimmed) return { handled: false };
+
+  // \u2500\u2500 \u6A21\u8003\u6682\u505C\u9501 \u2500\u2500
+  const mockState = readMockExamState(config);
+  if (mockState?.status === 'paused') {
+    const RESUME_TRIGGERS = /^(\u7EE7\u7EED\u6A21\u8003|\u7EE7\u7EED\u8003\u8BD5|\u63A5\u7740\u505A|\u7EE7\u7EED)$/;
+    const ABANDON_TRIGGERS = /^(\u653E\u5F03\u6A21\u8003|\u4E0D\u505A\u4E86|\u53D6\u6D88\u6A21\u8003)$/;
+    if (RESUME_TRIGGERS.test(trimmed) || ABANDON_TRIGGERS.test(trimmed)) {
+      return { handled: false };
+    }
+    const used = mockState.elapsed_seconds || 0;
+    const mins = Math.floor(used / 60);
+    const secs = used % 60;
+    return {
+      handled: true,
+      reply: `\u23F8\uFE0F  \u6A21\u8003\u5DF2\u6682\u505C\uFF08\u5DF2\u7528 ${mins} \u5206 ${secs} \u79D2\uFF09\n\u5982\u9700\u7EE7\u7EED\u8BF7\u56DE\u590D\u300C\u7EE7\u7EED\u300D\n\u5982\u9700\u653E\u5F03\u8BF7\u56DE\u590D\u300C\u653E\u5F03\u6A21\u8003\u300D`,
+    };
+  }
 
   // 章节练习：先发统计图、后补章节名
   const pendingChapter = extractChapterFromCaption(trimmed);

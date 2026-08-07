@@ -38,13 +38,22 @@ export interface Session {
   maxHistoryLength?: number;
   /** PMP Athena 硬路由会话状态 */
   athena?: {
-    mode: 'review' | 'daily' | 'daily_select';
+    mode: 'review' | 'daily' | 'daily_select' | 'variant_review';
     currentErrorId?: number;
     reviewCorrect?: number;
     reviewTotal?: number;
     dailyQuestionIndex?: number;
     dailyTotal?: number;
     dailyCorrect?: number;
+    /** 高频错题变式巩固 */
+    isHighFrequency?: boolean;
+    variantIds?: number[];
+    variantIndex?: number;
+    variantCorrect?: number;
+    variantTotal?: number;
+    highFrequencyErrorId?: number;
+    /** 选项缺失时：当前题是否等待知识回顾判定（已掌握/未掌握） */
+    isKnowledgeReview?: boolean;
   };
 }
 
