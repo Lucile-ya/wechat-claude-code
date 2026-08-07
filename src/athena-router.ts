@@ -19,6 +19,7 @@ interface ReviewNextResult {
   status: string;
   error_id: number | null;
   text: string;
+  is_high_frequency?: boolean;
 }
 
 interface GradeReviewResult {
@@ -28,6 +29,12 @@ interface GradeReviewResult {
   next_error_id: number | null;
   done?: boolean;
   text: string;
+  /** 高频错题变式触发 */
+  is_high_frequency?: boolean;
+  variant_ids?: number[];
+  variant_index?: number;
+  variant_correct?: number;
+  variant_total?: number;
 }
 
 interface DailyMenuResult {
@@ -205,6 +212,19 @@ const PREP_SUMMARY_TRIGGERS = [
   /^总结(?:一下)?(?:我的)?(?:做题|刷题)(?:情况)?$/,
   /^(?:总结|汇总)(?:一下)?(?:我)?(?:这几个月)?(?:的)?备考(?:刷题)?(?:情况)?$/,
   /^备考(?:刷题)?情况$/,
+  // 新增: 做题汇总 / 做题数据 / 整体情况 / 我的进度 等短指令
+  /^做题汇总$/,
+  /^做题数据$/,
+  /^整体情况$/,
+  /^我的进度$/,
+  /^做题总览$/,
+  /^做题情况$/,
+  /^今日状态$/,
+  /^今天进度$/,
+  /^汇总$/,
+  /^所有做题记录$/,
+  /^近两个月$/,
+  /^\\d{1,2}月\\d{1,2}月做题$/,
 ];
 
 /** 7月做题情况 / 7月刷题统计 — 非日期选题 */
@@ -512,7 +532,26 @@ function runDailyPractice(config: Config, args: string[]) {
   return runPythonScript(config, 'daily_practice.py', args);
 }
 
+// 直接总览指令（无参数，直接跑 practice_overview_light.py）
+const DIRECT_OVERVIEW_TRIGGERS = new Set([
+  '做题汇总', '做题数据', '整体情况', '我的进度', '做题总览', '做题情况',
+  '今日状态', '今天进度', '汇总', '所有做题记录', '近两个月',
+]);
+
 function runPracticeSummary(config: Config, text: string): AthenaRouteResult {
+  const trimmed = text.trim().replace(/[​﻿]/g, '');
+
+  // 直接总览：无参数，运行 practice_overview_light.py
+  if (DIRECT_OVERVIEW_TRIGGERS.has(trimmed)) {
+    const { ok, stdout, stderr } = runPythonScript(config, 'practice_overview_light.py', []);
+    if (!ok) {
+      logger.error('practice overview failed', { stderr, text });
+      return { handled: true, reply: '⚠️ 做题汇总生成失败，请稍后重试。' };
+    }
+    return { handled: true, reply: stdout || '📊 暂无做题记录。' };
+  }
+
+  // 自然语言查询：走 practice_summary.py parse
   const { ok, stdout, stderr } = runPythonScript(config, 'practice_summary.py', [
     'parse', text, '--json',
   ]);
@@ -591,6 +630,7 @@ function startReview(config: Config): AthenaRouteResult {
           currentErrorId: data.error_id,
           reviewCorrect: 0,
           reviewTotal: 0,
+          isHighFrequency: data.is_high_frequency ?? false,
         },
       },
     };
@@ -639,6 +679,26 @@ function gradeReviewAnswer(
   const reviewCorrect = (prev.reviewCorrect ?? 0) + (data.correct ? 1 : 0);
   const reviewTotal = (prev.reviewTotal ?? 0) + 1;
 
+  // ── 变式子模式触发 ──
+  if (data.status === 'graded_variant_pending' && data.variant_ids && data.variant_ids.length > 0) {
+    return {
+      handled: true,
+      reply: data.text,
+      sessionPatch: {
+        athena: {
+          mode: 'variant_review',
+          highFrequencyErrorId: data.error_id,
+          variantIds: data.variant_ids,
+          variantIndex: data.variant_index ?? 0,
+          variantCorrect: data.variant_correct ?? 0,
+          variantTotal: data.variant_total ?? data.variant_ids.length,
+          reviewCorrect,
+          reviewTotal,
+        },
+      },
+    };
+  }
+
   if (data.done || data.next_error_id == null) {
     const summary =
       `\n\n📋 复习小结：正确 ${reviewCorrect}/${reviewTotal}`;
@@ -658,9 +718,106 @@ function gradeReviewAnswer(
         currentErrorId: data.next_error_id,
         reviewCorrect,
         reviewTotal,
+        isHighFrequency: data.is_high_frequency ?? false,
       },
     },
   };
+}
+
+function gradeVariantAnswer(
+  config: Config,
+  session: Session,
+  answer: string,
+): AthenaRouteResult {
+  const a = session.athena;
+  if (!a || a.variantIds == null || a.highFrequencyErrorId == null) {
+    return { handled: false };
+  }
+
+  const errorId = a.highFrequencyErrorId;
+  const variantIds = a.variantIds;
+  const currentIndex = a.variantIndex ?? 0;
+  const currentCorrect = a.variantCorrect ?? 0;
+
+  const { ok, stdout, stderr } = runStudyAdvisor(config, [
+    'variant-grade',
+    String(errorId),
+    String(currentIndex),
+    answer.toUpperCase(),
+    JSON.stringify(variantIds),
+    String(currentCorrect),
+    '--json',
+  ]);
+
+  if (!ok) {
+    logger.error('variant-grade failed', { stderr, errorId });
+    return { handled: true, reply: '⚠️ 变式判卷失败，请重试。' };
+  }
+
+  const data = parseJson<{
+    status: string;
+    correct: boolean;
+    variant_ids?: number[];
+    variant_index?: number;
+    variant_correct?: number;
+    variant_total?: number;
+    passed?: boolean;
+    next_error_id?: number | null;
+    done?: boolean;
+    text: string;
+  }>(stdout);
+
+  if (!data) {
+    return { handled: true, reply: stdout || '⚠️ 无法解析变式判卷结果' };
+  }
+
+  const reviewCorrect = a.reviewCorrect ?? 0;
+  const reviewTotal = a.reviewTotal ?? 0;
+
+  if (data.status === 'variant_done') {
+    // 变式全部完成 → 返回 review next 或结束
+    if (data.done || data.next_error_id == null) {
+      const summary = `\n\n📋 复习小结：正确 ${reviewCorrect}/${reviewTotal}`;
+      return {
+        handled: true,
+        reply: data.text + summary,
+        sessionPatch: { athena: undefined },
+      };
+    }
+    return {
+      handled: true,
+      reply: data.text,
+      sessionPatch: {
+        athena: {
+          mode: 'review',
+          currentErrorId: data.next_error_id,
+          reviewCorrect,
+          reviewTotal,
+        },
+      },
+    };
+  }
+
+  if (data.status === 'variant_question') {
+    return {
+      handled: true,
+      reply: data.text,
+      sessionPatch: {
+        athena: {
+          mode: 'variant_review',
+          highFrequencyErrorId: errorId,
+          variantIds: variantIds,
+          variantIndex: data.variant_index ?? (currentIndex + 1),
+          variantCorrect: data.variant_correct ?? currentCorrect,
+          variantTotal: data.variant_total ?? variantIds.length,
+          reviewCorrect,
+          reviewTotal,
+        },
+      },
+    };
+  }
+
+  return { handled: true, reply: data.text };
 }
 
 function runFrequentErrors(config: Config): AthenaRouteResult {
@@ -952,7 +1109,107 @@ export function routeAthenaMessage(
     return runPracticeSummary(config, trimmed);
   }
 
-  // ── 错题复习：单字母判卷（优先于 batch practice 和 daily）──
+  // ═══════════════════════════════════════════════════════════════
+  // 错题复习模式：总闸门 — 所有用户输入优先在复习流内处理
+  // 只有「退出复习」「结束」「回到主菜单」「停止」等明确指令才退出
+  // ═══════════════════════════════════════════════════════════════
+  if (session.athena?.mode === 'review' && session.athena.currentErrorId != null) {
+    const rid = session.athena.currentErrorId;
+    const prevCorrect = session.athena.reviewCorrect ?? 0;
+    const prevTotal = session.athena.reviewTotal ?? 0;
+    const isHf = session.athena.isHighFrequency ?? false;
+
+    // ── 退出复习 ──
+    if (/^(退出复习|结束复习|返回主菜单|停止|退出|结束)$/.test(trimmed)) {
+      logger.info('Athena hard route: exit review', { errorId: rid });
+      const summary = `📋 本次复习小结：正确 ${prevCorrect}/${prevTotal}`;
+      return { handled: true, reply: `👋 已退出复习。${prevTotal > 0 ? summary : ''}`, sessionPatch: { athena: undefined } };
+    }
+
+    // ── 跳过（支持 "跳过"、"跳过。"、"跳过！"）──
+    if (/^跳过[。！!]?$/.test(trimmed) || trimmed === '/skip') {
+      logger.info('Athena hard route: review skip', { errorId: rid });
+      const { ok, stdout, stderr } = runStudyAdvisor(config, ['review-skip', String(rid), '--json']);
+      if (!ok) {
+        logger.error('review-skip failed', { stderr });
+        return { handled: true, reply: '⚠️ 跳过失败，请重试。' };
+      }
+      const data = parseJson<{ status: string; text: string; next_error_id: number | null; done?: boolean; is_knowledge_review?: boolean }>(stdout);
+      if (!data) return { handled: true, reply: stdout || '⚠️ 无法解析结果' };
+      if (data.done || data.next_error_id == null) {
+        const summary = `\n\n📋 复习小结：正确 ${prevCorrect}/${prevTotal}`;
+        return { handled: true, reply: data.text + summary, sessionPatch: { athena: undefined } };
+      }
+      return {
+        handled: true, reply: data.text,
+        sessionPatch: {
+          athena: { mode: 'review', currentErrorId: data.next_error_id, reviewCorrect: prevCorrect, reviewTotal: prevTotal, isHighFrequency: false, isKnowledgeReview: data.is_knowledge_review ?? false },
+        },
+      };
+    }
+
+    // ── 补录选项（补录 #N）──
+    const supplementMatch = trimmed.match(/^补录\s*#?(\d+)/);
+    if (supplementMatch) {
+      const targetId = parseInt(supplementMatch[1], 10);
+      logger.info('Athena hard route: supplement options', { errorId: targetId });
+      return {
+        handled: true,
+        reply: `📝 请发送以下格式补录 #${targetId} 的选项：\n\n第1行: 题干（如已有则留空或确认）\n后续行:\nA. 选项A\nB. 选项B\nC. 选项C\nD. 选项D\n\n或直接发送完整题干+选项文本。`,
+        sessionPatch: { athena: { mode: 'review', currentErrorId: rid, reviewCorrect: prevCorrect, reviewTotal: prevTotal, isHighFrequency: isHf } },
+      };
+    }
+
+    // ── 已掌握 / 未掌握（知识回顾模式）──
+    if (/^(已掌握|未掌握)[。！!]?$/.test(trimmed)) {
+      logger.info('Athena hard route: knowledge review answer', { errorId: rid, answer: trimmed });
+      return gradeReviewAnswer(config, session, trimmed.replace(/[。！!]$/, ''));
+    }
+
+    // ── 兜底：所有其他输入 → 尝试判卷（A/B/C/D 或连续字母）──
+    // 注意："绕过/补录/跳过"已在上面被拦截，"退出复习"类也已被拦截
+    // 不要加任何中间判断——它们会导致 match 失败后穿透到知识查询路由
+    if (ANSWER_PATTERN.test(trimmed) || MULTI_ANSWER_PATTERN.test(trimmed)) {
+      return gradeReviewAnswer(config, session, trimmed);
+    }
+
+    // 不是答案也不是指令 → 提示用户当前在复习中
+    return {
+      handled: true,
+      reply: `📌 当前在复习错题模式中（#${rid}）。\n💬 请输入 A/B/C/D 作答，或回复「跳过」「已掌握」「未掌握」「退出复习」。`,
+      sessionPatch: { athena: { mode: 'review', currentErrorId: rid, reviewCorrect: prevCorrect, reviewTotal: prevTotal, isHighFrequency: isHf } },
+    };
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // 变式巩固模式：总闸门（同样拦截所有输入，防穿透）
+  // ═══════════════════════════════════════════════════════════════
+  if (session.athena?.mode === 'variant_review' && session.athena.variantIds != null) {
+    if (/^(退出复习|结束复习|返回主菜单|停止|退出|结束)$/.test(trimmed)) {
+      const prevCorrect = session.athena.reviewCorrect ?? 0;
+      const prevTotal = session.athena.reviewTotal ?? 0;
+      logger.info('Athena hard route: exit variant review', { hfErrorId: session.athena.highFrequencyErrorId });
+      const summary = `📋 本次复习小结：正确 ${prevCorrect}/${prevTotal}`;
+      return { handled: true, reply: `👋 已退出变式巩固。${prevTotal > 0 ? summary : ''}`, sessionPatch: { athena: undefined } };
+    }
+    if (ANSWER_PATTERN.test(trimmed) || MULTI_ANSWER_PATTERN.test(trimmed)) {
+      return gradeVariantAnswer(config, session, trimmed);
+    }
+    // 变式模式下所有非答案输入 → 提示
+    return {
+      handled: true,
+      reply: `📌 当前在变式巩固模式中（高频错题巩固）。\n💬 请输入 A/B/C/D 作答，或回复「退出复习」离开。`,
+      sessionPatch: { athena: session.athena },
+    };
+  }
+
+  // ── 启动复习（必须在 review 模式闸门之后，否则永远进不去）──
+  if (REVIEW_TRIGGERS.some((re) => re.test(trimmed))) {
+    logger.info('Athena hard route: start review', { text: trimmed });
+    return startReview(config);
+  }
+
+  // ── 错题复习：单字母判卷（已移到 review 模式闸门内，此处仅保底）──
   if (
     session.athena?.mode === 'review' &&
     session.athena.currentErrorId != null &&
@@ -961,11 +1218,9 @@ export function routeAthenaMessage(
     return gradeReviewAnswer(config, session, trimmed);
   }
 
-  // ── 启动复习（优先于 batch practice 和 daily）──
-  if (REVIEW_TRIGGERS.some((re) => re.test(trimmed))) {
-    logger.info('Athena hard route: start review', { text: trimmed });
-    return startReview(config);
-  }
+  // ═══════════════════════════════════════════════════════
+  // 以下路由在 review / variant_review 模式下全部跳过
+  // ═══════════════════════════════════════════════════════
 
   // App 批量题补录标准答案
   if (BATCH_UPDATE_TRIGGER.test(trimmed) && /正确答案/i.test(trimmed)) {
@@ -1032,13 +1287,17 @@ export function routeAthenaMessage(
     return resolveAndStartDaily(config, trimmed);
   }
 
-  // 动态知识查询：挣值 / 详细 挣值 / 套路 变更（本地索引，秒回）
+  // 动态知识查询 — 复习/变式模式中跳过，防止"跳过"等指令被误识别
   if (
+    session.athena?.mode !== 'review' &&
+    session.athena?.mode !== 'variant_review' &&
+    (
     /^(详细|展开|套路|情景|关联)\s*/.test(trimmed) ||
     (/^[\u4e00-\u9fffA-Za-z/]{2,16}$/.test(trimmed) &&
       !REVIEW_TRIGGERS.some((re) => re.test(trimmed)) &&
       !WEAKNESS_TRIGGERS.some((re) => re.test(trimmed)) &&
       !DAILY_TRIGGERS.some((re) => re.test(trimmed)))
+    )
   ) {
     const dk = runDynamicKnowledge(config, trimmed);
     if (dk.handled) {
