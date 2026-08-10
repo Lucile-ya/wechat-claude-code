@@ -1195,6 +1195,8 @@ export function routeAthenaMessage(
       '',
       '🎲 发送「随机模考」→ 全量题库随机 180 题',
       '📊 发送「模考清单」→ 查看完成进度',
+      '',
+      '💡 请输入完整指令（如「开始模考一」），不要只发数字。',
     ].join('\n');
     return { handled: true, reply: menu };
   }
