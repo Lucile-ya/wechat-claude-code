@@ -151,6 +151,17 @@ const REVIEW_TRIGGERS = [
   /开始复习/,
 ];
 
+const MOCK_EXAM_TRIGGERS = [
+  /^模考$/,
+  /^开始模考/,
+  /^随机模考$/,
+  /^继续模考$/,
+  /^模考状态$/,
+  /^模考清单$/,
+  /^模考看板$/,
+  /^模考进度$/,
+];
+
 const WEAKNESS_TRIGGERS = [
   /^薄弱点$/,
   /^薄弱领域$/,
@@ -1139,6 +1150,38 @@ export function routeAthenaMessage(
     return resolveAndStartDaily(config, redoText, true);
   }
 
+  // 模考清单 / 模考看板 / 模考进度
+  if (/^(模考清单|模考看板|还有哪几套模考|模考进度)$/.test(trimmed)) {
+    logger.info('Athena hard route: mock exam kanban', { text: trimmed });
+    const { ok, stdout, stderr } = runPythonScript(config, 'mock_exam_kanban.py', ['kanban']);
+    if (!ok) {
+      logger.error('mock exam kanban failed', { stderr });
+      return { handled: true, reply: '⚠️ 模考看板生成失败，请稍后重试。' };
+    }
+    return { handled: true, reply: stdout };
+  }
+
+  // 录入成绩 <模考名> <分数>
+  const recordScoreMatch = trimmed.match(/^录入成绩\s+(.+?)\s+(\d{1,3})$/);
+  if (recordScoreMatch) {
+    const examName = recordScoreMatch[1].trim();
+    const score = parseInt(recordScoreMatch[2], 10);
+    logger.info('Athena hard route: record mock exam score', { examName, score });
+    const { ok, stdout, stderr } = runPythonScript(config, 'mock_exam_kanban.py', [
+      'record', examName, String(score),
+    ]);
+    if (!ok) {
+      logger.error('record score failed', { stderr });
+      return { handled: true, reply: '⚠️ 成绩录入失败，请稍后重试。' };
+    }
+    try {
+      const data = JSON.parse(stdout) as { status: string; text: string };
+      return { handled: true, reply: data.text || stdout };
+    } catch {
+      return { handled: true, reply: stdout || '⚠️ 成绩录入异常' };
+    }
+  }
+
   // 月度 / 备考刷题汇总
   if (isPracticeSummaryQuery(trimmed)) {
     logger.info('Athena hard route: practice summary', { text: trimmed });
@@ -1332,7 +1375,8 @@ export function routeAthenaMessage(
     (/^[\u4e00-\u9fffA-Za-z/]{2,16}$/.test(trimmed) &&
       !REVIEW_TRIGGERS.some((re) => re.test(trimmed)) &&
       !WEAKNESS_TRIGGERS.some((re) => re.test(trimmed)) &&
-      !DAILY_TRIGGERS.some((re) => re.test(trimmed)))
+      !DAILY_TRIGGERS.some((re) => re.test(trimmed)) &&
+      !MOCK_EXAM_TRIGGERS.some((re) => re.test(trimmed)))
     )
   ) {
     const dk = runDynamicKnowledge(config, trimmed);
