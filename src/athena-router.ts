@@ -331,6 +331,60 @@ function readMockExamState(config: Config): {
   }
 }
 
+/** 读取新版 mock_exam_engine.json */
+function readMockEngineState(config: Config): {
+  status?: string;
+  paper?: string;
+  current_index?: number;
+  total?: number;
+  answered?: number;
+  paused_accumulated?: number;
+} | null {
+  const statePath = join(
+    config.workingDirectory,
+    'pmp_notes',
+    'mock_exam_engine.json',
+  );
+  if (!existsSync(statePath)) return null;
+  try {
+    return JSON.parse(readFileSync(statePath, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+/** 调用 mock_exam_engine.py */
+function runMockExamEngine(
+  config: Config,
+  args: string[],
+): { ok: boolean; stdout: string; stderr: string } {
+  return runModuleScript(config, 'mock_exam_engine.py', args);
+}
+
+/** 调用 pmp_athena/ 下的 Python 脚本 */
+function runModuleScript(
+  config: Config,
+  scriptName: string,
+  args: string[],
+): { ok: boolean; stdout: string; stderr: string } {
+  const pythonBin = config.pythonBin || 'python';
+  const cwd = config.workingDirectory;
+  const script = join(cwd, 'pmp_athena', scriptName);
+
+  const result = spawnSync(pythonBin, [script, ...args], {
+    cwd,
+    encoding: 'utf-8',
+    timeout: 180_000,
+    env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
+  });
+
+  return {
+    ok: result.status === 0,
+    stdout: (result.stdout || '').trim(),
+    stderr: (result.stderr || '').trim(),
+  };
+}
+
 function looksLikeDailyDate(text: string): boolean {
   return (
     STANDALONE_MD.test(text) ||
@@ -1078,7 +1132,93 @@ export function routeAthenaMessage(
   const trimmed = text.trim().replace(/[\u200b\uFEFF]/g, '');
   if (!trimmed) return { handled: false };
 
-  // \u2500\u2500 \u6A21\u8003\u6682\u505C\u9501 \u2500\u2500
+  // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
+  // \u6A21\u8003\u5F15\u64CE\u72B6\u6001\u673A \u2014 \u63A5\u7BA1\u6240\u6709\u6D88\u606F
+  // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
+  const engState = readMockEngineState(config);
+
+  // \u2500\u2500 \u6A21\u8003 pause-lock \u2500\u2500
+  if (engState?.status === 'paused') {
+    const RESUME_RE = /^(\u7EE7\u7EED|\u7EE7\u7EED\u6A21\u8003|\u7EE7\u7EED\u8003\u8BD5|\u63A5\u7740\u505A|resume)$/;
+    const ABANDON_RE = /^(\u653E\u5F03\u6A21\u8003|\u4E0D\u505A\u4E86|\u53D6\u6D88\u6A21\u8003|abandon)$/;
+    if (RESUME_RE.test(trimmed)) {
+      // resume will be handled below (trigger check)
+    } else if (ABANDON_RE.test(trimmed)) {
+      const result = runMockExamEngine(config, ['abandon']);
+      const r = parseJson<{ status: string; text: string }>(result.stdout);
+      return { handled: true, reply: r?.text || '\uD83D\uDDD1\uFE0F \u6A21\u8003\u5DF2\u653E\u5F03\u3002' };
+    } else {
+      const answered = engState.answered || 0;
+      const total = engState.total || 180;
+      const elapsed = engState.paused_accumulated || 0;
+      const mins = Math.floor(elapsed / 60);
+      return {
+        handled: true,
+        reply: `\u23F8\uFE0F  \u6A21\u8003\u5DF2\u6682\u505C\uFF08\u5DF2\u7528 ${mins} \u5206\uFF09\n   \u8FDB\u5EA6: ${answered}/${total} \u9898\n   \u5982\u9700\u7EE7\u7EED\u8BF7\u56DE\u590D\u300C\u7EE7\u7EED\u300D\n   \u5982\u9700\u653E\u5F03\u8BF7\u56DE\u590D\u300C\u653E\u5F03\u6A21\u8003\u300D`,
+      };
+    }
+  }
+
+  // \u2500\u2500 \u6A21\u8003 active \u2014 \u53EA\u5904\u7406\u6A21\u8003\u76F8\u5173\u6307\u4EE4 \u2500\u2500
+  if (engState?.status === 'active') {
+    const ANSWER_RE = /^[A-Ea-e]$/;
+    const ANSWER_BATCH_RE = /^[A-Ea-e]{2,15}$/;
+    const PAUSE_RE = /^(\u6682\u505C|\u6682\u505C\u6A21\u8003|\u5148\u505C\u4E00\u4E0B|pause)$/;
+    const ABANDON_RE = /^(\u653E\u5F03\u6A21\u8003|\u4E0D\u505A\u4E86|\u53D6\u6D88\u6A21\u8003|abandon)$/;
+    const STATUS_RE = /^(\u6A21\u8003\u8FDB\u5EA6|\u6A21\u8003\u72B6\u6001|\u6A21\u8003\u5230\u54EA\u4E86|\u8FDB\u5EA6)$/;
+
+    if (ABANDON_RE.test(trimmed)) {
+      const result = runMockExamEngine(config, ['abandon']);
+      const r = parseJson<{ text: string }>(result.stdout);
+      return { handled: true, reply: r?.text || '\uD83D\uDDD1\uFE0F \u6A21\u8003\u5DF2\u653E\u5F03\u3002' };
+    }
+    if (PAUSE_RE.test(trimmed)) {
+      const result = runMockExamEngine(config, ['pause']);
+      const r = parseJson<{ status: string; text: string }>(result.stdout);
+      return { handled: true, reply: r?.text || '\u23F8\uFE0F \u5DF2\u6682\u505C\u3002' };
+    }
+    if (STATUS_RE.test(trimmed)) {
+      const result = runMockExamEngine(config, ['status']);
+      const r = parseJson<{ status: string; text: string }>(result.stdout);
+      return { handled: true, reply: r?.text || '\uD83D\uDCED \u72B6\u6001\u672A\u77E5\u3002' };
+    }
+
+    // Answer routing: single letter or batch
+    if (ANSWER_BATCH_RE.test(trimmed)) {
+      const letters = trimmed.toUpperCase().split('');
+      let lastResult: string | null = null;
+      for (const letter of letters) {
+        const result = runMockExamEngine(config, ['answer', letter]);
+        const r = parseJson<{ status: string; text: string; index?: number; total?: number }>(result.stdout);
+        if (r?.status === 'done') {
+          return { handled: true, reply: r.text };
+        }
+        if (r?.status === 'question') {
+          lastResult = r.text;
+        }
+      }
+      if (lastResult) {
+        return { handled: true, reply: lastResult };
+      }
+      return { handled: true, reply: '\u26A0\uFE0F \u5224\u5377\u5931\u8D25\u3002' };
+    }
+    if (ANSWER_RE.test(trimmed)) {
+      const result = runMockExamEngine(config, ['answer', trimmed.toUpperCase()]);
+      const r = parseJson<{ status: string; text: string }>(result.stdout);
+      if (r?.status === 'done') {
+        return { handled: true, reply: r.text };
+      }
+      return { handled: true, reply: r?.text || '\u26A0\uFE0F \u5F15\u64CE\u65E0\u8FD4\u56DE\u3002' };
+    }
+
+    // Block everything else during exam
+    return {
+      handled: true,
+      reply: `\uD83D\uDCCC \u6A21\u8003\u8FDB\u884C\u4E2D\uFF08\u7B2C ${(engState.current_index || 0) + 1} \u9898\uFF09\n\uD83D\uDCAC \u8BF7\u8F93\u5165 A/B/C/D \u4F5C\u7B54\uFF0C\u6216\u300C\u6682\u505C\u300D\u300C\u653E\u5F03\u6A21\u8003\u300D\u3002`,
+    };
+  }
+
+  // \u2500\u2500 \u65E7\u7248 mock_exam_state.json pause-lock\uFF08\u517C\u5BB9\uFF09\u2500\u2500
   const mockState = readMockExamState(config);
   if (mockState?.status === 'paused') {
     const RESUME_TRIGGERS = /^(\u7EE7\u7EED\u6A21\u8003|\u7EE7\u7EED\u8003\u8BD5|\u63A5\u7740\u505A|\u7EE7\u7EED)$/;
@@ -1180,6 +1320,28 @@ export function routeAthenaMessage(
       handled: true,
       reply: `📅 距离 2026-09-12 PMP 考试还有 ${days} 天 ${hours} 小时 ${minutes} 分钟`,
     };
+  }
+
+  // ── 模考启动（开始模考一/二/三 + 随机模考，硬路由，不经 Claude）──
+  const startMockMatch = trimmed.match(/^开始模考([一二三123])$/);
+  const isRandomMock = /^随机模考$/.test(trimmed);
+  if (startMockMatch || isRandomMock) {
+    let paper = 'random';
+    if (startMockMatch) {
+      const d = startMockMatch[1];
+      paper = (d === '一' || d === '1') ? 'one' : (d === '二' || d === '2') ? 'two' : 'three';
+    }
+    logger.info('Athena hard route: start mock exam', { paper });
+    const result = runMockExamEngine(config, ['start', '--paper', paper]);
+    const r = parseJson<{ status: string; text: string; error?: string }>(result.stdout);
+    if (r?.status === 'error') {
+      return { handled: true, reply: `⚠️ ${r.error || '启动模考失败'}` };
+    }
+    if (r?.status === 'question') {
+      const hint = '📝 模考已启动（共 180 题）。逐题作答，输入 A/B/C/D 即可。\n   · 回复「暂停」随时暂停\n   · 回复「放弃模考」退出\n\n';
+      return { handled: true, reply: hint + r.text };
+    }
+    return { handled: true, reply: result.stdout || '⚠️ 启动模考无返回。' };
   }
 
   // ── 模考入口菜单（裸「模考」/「开始模考」硬路由，不经 Claude）──
