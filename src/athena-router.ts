@@ -1150,6 +1150,55 @@ export function routeAthenaMessage(
     return resolveAndStartDaily(config, redoText, true);
   }
 
+  // ── 帮助/菜单/问候（硬路由，不经 Claude）──
+  if (/^(帮助|菜单|功能|怎么用|hello|hi|你好)$/i.test(trimmed)) {
+    logger.info('Athena hard route: help menu', { text: trimmed });
+    const menu = [
+      '🦉 PMP Athena 功能菜单',
+      '',
+      '📝 刷题：每日一练 | 随机每日一练 | X月X日每日一练答案：XXX',
+      '📊 模考：开始模考 | 随机模考 | 模考清单',
+      '❌ 错题：复习错题 | 薄弱点 | 高频错题',
+      '📚 学习：X知识点 | 学习计划 | 今日状态 | 分析趋势',
+      '🌙 其他：睡前复习 | 倒计时',
+      '',
+      '💬 直接发送以上任一指令即可',
+    ].join('\n');
+    return { handled: true, reply: menu };
+  }
+
+  // ── 倒计时（硬路由，不经 Claude）──
+  if (/^(倒计时|countdown|还有多久|考试还有几天)$/.test(trimmed)) {
+    logger.info('Athena hard route: countdown');
+    const examDate = new Date('2026-09-12T00:00:00+08:00');
+    const now = new Date();
+    const diff = examDate.getTime() - now.getTime();
+    const days = Math.floor(diff / (1000 * 60 * 60 * 24));
+    const hours = Math.floor((diff % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+    const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+    return {
+      handled: true,
+      reply: `📅 距离 2026-09-12 PMP 考试还有 ${days} 天 ${hours} 小时 ${minutes} 分钟`,
+    };
+  }
+
+  // ── 模考入口菜单（裸「模考」/「开始模考」硬路由，不经 Claude）──
+  if (/^模考$/.test(trimmed) || /^开始模考$/.test(trimmed)) {
+    logger.info('Athena hard route: mock exam menu', { text: trimmed });
+    const menu = [
+      '📋 模考模式',
+      '',
+      '📝 指定试卷：',
+      '  发送「开始模考一」→ 考前冲刺卷1（180题）',
+      '  发送「开始模考二」→ 考前冲刺卷2（180题）',
+      '  发送「开始模考三」→ 考前冲刺卷3（180题）',
+      '',
+      '🎲 发送「随机模考」→ 全量题库随机 180 题',
+      '📊 发送「模考清单」→ 查看完成进度',
+    ].join('\n');
+    return { handled: true, reply: menu };
+  }
+
   // 模考清单 / 模考看板 / 模考进度
   if (/^(模考清单|模考看板|还有哪几套模考|模考进度)$/.test(trimmed)) {
     logger.info('Athena hard route: mock exam kanban', { text: trimmed });
