@@ -1183,24 +1183,19 @@ export function routeAthenaMessage(
       return { handled: true, reply: r?.text || '\uD83D\uDCED \u72B6\u6001\u672A\u77E5\u3002' };
     }
 
-    // Answer routing: single letter or batch
-    if (ANSWER_BATCH_RE.test(trimmed)) {
-      const letters = trimmed.toUpperCase().split('');
-      let lastResult: string | null = null;
-      for (const letter of letters) {
-        const result = runMockExamEngine(config, ['answer', letter]);
-        const r = parseJson<{ status: string; text: string; index?: number; total?: number }>(result.stdout);
-        if (r?.status === 'done') {
-          return { handled: true, reply: r.text };
-        }
-        if (r?.status === 'question') {
-          lastResult = r.text;
-        }
+    // Answer routing: multi-letter (multi-select) or single
+    const isMultiLetter = /^[A-Ea-e]{2,8}$/.test(trimmed);
+    if (isMultiLetter) {
+      // Pass as single answer \u2014 engine handles multi-select normalization
+      const result = runMockExamEngine(config, ['answer', trimmed.toUpperCase()]);
+      const r = parseJson<{ status: string; text: string; index?: number; total?: number; error?: string }>(result.stdout);
+      if (r?.status === 'error') {
+        return { handled: true, reply: `\u26A0\uFE0F ${r.error}` };
       }
-      if (lastResult) {
-        return { handled: true, reply: lastResult };
+      if (r?.status === 'done') {
+        return { handled: true, reply: r.text };
       }
-      return { handled: true, reply: '\u26A0\uFE0F \u5224\u5377\u5931\u8D25\u3002' };
+      return { handled: true, reply: r?.text || '\u26A0\uFE0F \u5F15\u64CE\u65E0\u8FD4\u56DE\u3002' };
     }
     if (ANSWER_RE.test(trimmed)) {
       const result = runMockExamEngine(config, ['answer', trimmed.toUpperCase()]);
