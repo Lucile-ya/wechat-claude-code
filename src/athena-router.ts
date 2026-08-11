@@ -1323,13 +1323,16 @@ export function routeAthenaMessage(
   }
 
   // ── 模考启动（开始模考一/二/三 + 随机模考，硬路由，不经 Claude）──
-  const startMockMatch = trimmed.match(/^开始模考([一二三123])$/);
+  const startMockMatch = trimmed.match(/^开始模考([一二三四1234])$/);
   const isRandomMock = /^随机模考$/.test(trimmed);
   if (startMockMatch || isRandomMock) {
     let paper = 'random';
     if (startMockMatch) {
       const d = startMockMatch[1];
-      paper = (d === '一' || d === '1') ? 'one' : (d === '二' || d === '2') ? 'two' : 'three';
+      paper = (d === '一' || d === '1') ? 'one'
+        : (d === '二' || d === '2') ? 'two'
+        : (d === '三' || d === '3') ? 'three'
+        : 'four';
     }
     logger.info('Athena hard route: start mock exam', { paper });
     const result = runMockExamEngine(config, ['start', '--paper', paper]);
@@ -1338,7 +1341,7 @@ export function routeAthenaMessage(
       return { handled: true, reply: `⚠️ ${r.error || '启动模考失败'}` };
     }
     if (r?.status === 'question') {
-      const hint = '📝 模考已启动（共 180 题）。逐题作答，输入 A/B/C/D 即可。\n   · 回复「暂停」随时暂停\n   · 回复「放弃模考」退出\n\n';
+      const hint = '📝 模考已启动（共 175 题）。逐题作答，输入 A/B/C/D 即可。\n   · 回复「暂停」随时暂停\n   · 回复「放弃模考」退出\n\n';
       return { handled: true, reply: hint + r.text };
     }
     return { handled: true, reply: result.stdout || '⚠️ 启动模考无返回。' };
@@ -1351,11 +1354,12 @@ export function routeAthenaMessage(
       '📋 模考模式',
       '',
       '📝 指定试卷：',
-      '  发送「开始模考一」→ 考前冲刺卷1（180题）',
-      '  发送「开始模考二」→ 考前冲刺卷2（180题）',
-      '  发送「开始模考三」→ 考前冲刺卷3（180题）',
+      '  发送「开始模考一」→ 考前冲刺卷1（175题）',
+      '  发送「开始模考二」→ 考前冲刺卷2（175题）',
+      '  发送「开始模考三」→ 考前冲刺卷3（175题）',
+      '  发送「开始模考四」→ 模考卷二（175题）',
       '',
-      '🎲 发送「随机模考」→ 全量题库随机 180 题',
+      '🎲 发送「随机模考」→ 全量题库随机 175 题',
       '📊 发送「模考清单」→ 查看完成进度',
       '',
       '💡 请输入完整指令（如「开始模考一」），不要只发数字。',
