@@ -1317,6 +1317,26 @@ export function routeAthenaMessage(
     };
   }
 
+  // ── 题目解释（为啥/为什么/解释/选X不行吗，硬路由）──
+  if (!engState?.status || engState?.status === 'no_exam') {
+    const EXPLAIN_KW = /(?:为啥|为什么|解释|选\s*[A-D]\s*不|这道题选\s*[A-D])/;
+    const HAS_OPTIONS = /[A-D][.、．：:]\s*\S/;
+    if (EXPLAIN_KW.test(trimmed) && HAS_OPTIONS.test(trimmed)) {
+      logger.info('Athena hard route: explain question', { text: trimmed.slice(0, 80) });
+      const { ok, stdout, stderr } = runModuleScript(config, 'explain_question.py', [
+        'explain', '--text', trimmed,
+      ]);
+      if (ok) {
+        const r = parseJson<{ status: string; explanation: string }>(stdout);
+        if (r?.explanation) {
+          return { handled: true, reply: r.explanation };
+        }
+      }
+      // Fallback: let Claude handle it
+      return { handled: false };
+    }
+  }
+
   // ── 模考启动（开始模考一/二/三 + 随机模考，硬路由，不经 Claude）──
   const startMockMatch = trimmed.match(/^开始模考([一二三四1234])$/);
   const isRandomMock = /^随机模考$/.test(trimmed);
