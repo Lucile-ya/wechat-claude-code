@@ -1317,6 +1317,28 @@ export function routeAthenaMessage(
     };
   }
 
+  // ── 备考建议/今日计划（硬路由，call study_advice.py）──
+  if (!engState?.status || engState?.status === 'no_exam') {
+    if (/^(备考建议|我该怎么办|给点建议|分析)$/.test(trimmed)) {
+      logger.info('Athena hard route: study advice');
+      const { ok, stdout, stderr } = runModuleScript(config, 'study_advice.py', ['advice']);
+      if (ok) {
+        const r = parseJson<{ status: string; text: string }>(stdout);
+        if (r?.text) return { handled: true, reply: r.text };
+      }
+      return { handled: false };
+    }
+    if (/^(今日计划|今日详细计划)$/.test(trimmed)) {
+      logger.info('Athena hard route: daily plan');
+      const { ok, stdout, stderr } = runModuleScript(config, 'study_advice.py', ['daily-plan']);
+      if (ok) {
+        const r = parseJson<{ status: string; text: string }>(stdout);
+        if (r?.text) return { handled: true, reply: r.text };
+      }
+      return { handled: false };
+    }
+  }
+
   // ── 题目解释（为啥/为什么/解释/选X不行吗，硬路由）──
   if (!engState?.status || engState?.status === 'no_exam') {
     const EXPLAIN_KW = /(?:为啥|为什么|解释|选\s*[A-D]\s*不|这道题选\s*[A-D])/;
