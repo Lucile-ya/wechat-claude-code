@@ -1392,6 +1392,18 @@ export function routeAthenaMessage(
     return { handled: true, reply: result.stdout || '⚠️ 启动模考无返回。' };
   }
 
+  // ── 恢复上次放弃的模考（硬路由）──
+  if (/^恢复模考$/.test(trimmed)) {
+    logger.info('Athena hard route: recover mock exam');
+    const result = runMockExamEngine(config, ['recover']);
+    const r = parseJson<{ status: string; text: string; error?: string; next?: { text?: string } }>(result.stdout);
+    if (r?.status === 'error') {
+      return { handled: true, reply: `⚠️ ${r.error || '恢复失败'}` };
+    }
+    const nextText = r?.next?.text || '';
+    return { handled: true, reply: `${r?.text || '♻️ 已恢复'}${nextText ? '\n\n' + nextText : ''}` };
+  }
+
   // ── 模考入口菜单（裸「模考」/「开始模考」硬路由，不经 Claude）──
   if (/^模考$/.test(trimmed) || /^开始模考$/.test(trimmed)) {
     logger.info('Athena hard route: mock exam menu', { text: trimmed });
