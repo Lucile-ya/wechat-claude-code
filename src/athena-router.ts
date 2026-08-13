@@ -1142,13 +1142,19 @@ export function routeAthenaMessage(
     const RESUME_RE = /^(\u7EE7\u7EED|\u7EE7\u7EED\u6A21\u8003|\u7EE7\u7EED\u8003\u8BD5|\u63A5\u7740\u505A|resume)$/;
     const ABANDON_RE = /^(\u653E\u5F03\u6A21\u8003|\u4E0D\u505A\u4E86|\u53D6\u6D88\u6A21\u8003|abandon)$/;
     if (RESUME_RE.test(trimmed)) {
-      // resume will be handled below (trigger check)
+      const result = runMockExamEngine(config, ['resume']);
+      const r = parseJson<{ status: string; text: string; error?: string; next?: { text?: string } }>(result.stdout);
+      if (r?.status === 'error') {
+        return { handled: true, reply: `⚠️ ${r.error || '继续失败'}` };
+      }
+      const nextText = r?.next?.text || '';
+      return { handled: true, reply: `${r?.text || '▶️ 模考已继续'}${nextText ? '\n\n' + nextText : ''}` };
     } else if (ABANDON_RE.test(trimmed)) {
       const result = runMockExamEngine(config, ['abandon']);
       const r = parseJson<{ status: string; text: string }>(result.stdout);
       return { handled: true, reply: r?.text || '\uD83D\uDDD1\uFE0F \u6A21\u8003\u5DF2\u653E\u5F03\u3002' };
     } else {
-      const answered = engState.answered || 0;
+      const answered = engState.current_index ?? 0;
       const total = engState.total || 180;
       const elapsed = engState.paused_accumulated || 0;
       const mins = Math.floor(elapsed / 60);
