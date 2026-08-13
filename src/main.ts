@@ -739,6 +739,19 @@ async function handleMessage(
           return;
         }
       }
+
+      // OCR 预处理失败（image_processor.py 崩溃/未安装 OCR）：提示手动录入，而非静默落到 Claude 菜单
+      if (preflight === null) {
+        logger.warn('Athena screenshot preflight failed, prompt manual entry', { imagePath });
+        await sender.sendText(
+          fromUserId,
+          contextToken,
+          '⚠️ 截图识别失败，无法自动提取题目信息。\n请手动发送：我的答案 X，正确答案 Y\n（或附上更清晰的截图）',
+        );
+        session.state = 'idle';
+        sessionStore.save(account.accountId, session);
+        return;
+      }
     }
   }
 
