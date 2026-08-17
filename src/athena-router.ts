@@ -171,6 +171,15 @@ const WEAKNESS_TRIGGERS = [
   /^诊断报告$/,
 ];
 
+const TREND_TRIGGERS = [
+  /^分析趋势$/,
+  /^通过率预测$/,
+  /^预测通过率$/,
+  /^趋势分析$/,
+  /^我的趋势$/,
+  /^成绩趋势$/,
+];
+
 const FREQUENT_ERROR_TRIGGERS = [
   /^高频错题$/,
   /^常错题$/,
@@ -933,6 +942,17 @@ function runWeakness(config: Config): AthenaRouteResult {
   return { handled: true, reply: stdout };
 }
 
+function runTrend(config: Config): AthenaRouteResult {
+  const { ok, stdout, stderr } = runPythonScript(config, 'trend_analysis.py', []);
+
+  if (!ok) {
+    logger.error('trend analysis failed', { stderr });
+    return { handled: true, reply: '⚠️ 趋势分析失败，请稍后重试。' };
+  }
+
+  return { handled: true, reply: stdout };
+}
+
 function startDailyMenu(config: Config): AthenaRouteResult {
   const { ok, stdout, stderr } = runDailyPractice(config, ['menu', '--json']);
 
@@ -1640,6 +1660,12 @@ export function routeAthenaMessage(
   // 日期选择模式（菜单后回复日期）
   if (session.athena?.mode === 'daily_select' && looksLikeDailyDate(trimmed)) {
     return resolveAndStartDaily(config, trimmed);
+  }
+
+  // 趋势分析 / 通过率预测（硬路由，须在动态知识查询兜底之前拦截）
+  if (TREND_TRIGGERS.some((re) => re.test(trimmed))) {
+    logger.info('Athena hard route: trend analysis', { text: trimmed });
+    return runTrend(config);
   }
 
   // 动态知识查询 — 复习/变式模式中跳过，防止"跳过"等指令被误识别
