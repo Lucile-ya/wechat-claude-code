@@ -442,6 +442,7 @@ async function runDaemon(): Promise<void> {
   const messageQueue: WeixinMessage[] = [];
   let processingQueue = false;
   let lastUserText = '';  // 上一条用户文字，用于「先文后图」时给图片补配文
+  let lastUserTextAt = 0; // 上一条文字的时间戳（只关联 30 秒内的相邻文字）
 
   async function drainQueue(): Promise<void> {
     if (processingQueue) return;
@@ -449,9 +450,11 @@ async function runDaemon(): Promise<void> {
     while (messageQueue.length > 0) {
       const msg = messageQueue.shift()!;
       try {
-        await handleMessage(msg, account!, session, sessionStore, sender, config, sharedCtx, activeControllers, messageQueue, processedSeqs, lastUserText);
+        // 只把「30 秒内」的上一条文字作为配文，避免关联到太久之前的旧文字
+        const recentCaption = Date.now() - lastUserTextAt < 30_000 ? lastUserText : '';
+        await handleMessage(msg, account!, session, sessionStore, sender, config, sharedCtx, activeControllers, messageQueue, processedSeqs, recentCaption);
         const curText = extractTextFromItems(msg.item_list || []).trim();
-        if (curText) lastUserText = curText;
+        if (curText) { lastUserText = curText; lastUserTextAt = Date.now(); }
       } catch (err) {
         const errorMsg = err instanceof Error ? err.message : String(err);
         const stack = err instanceof Error ? err.stack?.slice(0, 500) : undefined;
