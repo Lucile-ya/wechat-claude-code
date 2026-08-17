@@ -441,6 +441,7 @@ async function runDaemon(): Promise<void> {
   // -- Message queue for serial processing --
   const messageQueue: WeixinMessage[] = [];
   let processingQueue = false;
+  let lastUserText = '';  // 上一条用户文字，用于「先文后图」时给图片补配文
 
   async function drainQueue(): Promise<void> {
     if (processingQueue) return;
@@ -448,7 +449,9 @@ async function runDaemon(): Promise<void> {
     while (messageQueue.length > 0) {
       const msg = messageQueue.shift()!;
       try {
-        await handleMessage(msg, account!, session, sessionStore, sender, config, sharedCtx, activeControllers, messageQueue, processedSeqs);
+        await handleMessage(msg, account!, session, sessionStore, sender, config, sharedCtx, activeControllers, messageQueue, processedSeqs, lastUserText);
+        const curText = extractTextFromItems(msg.item_list || []).trim();
+        if (curText) lastUserText = curText;
       } catch (err) {
         const errorMsg = err instanceof Error ? err.message : String(err);
         const stack = err instanceof Error ? err.stack?.slice(0, 500) : undefined;
@@ -530,6 +533,7 @@ async function handleMessage(
   activeControllers: Map<string, AbortController>,
   messageQueue: WeixinMessage[],
   processedSeqs: Set<number>,
+  lastCaption?: string,
 ): Promise<void> {
   // Filter: only user messages with required fields
   if (msg.message_type !== MessageType.USER) return;
@@ -586,6 +590,8 @@ async function handleMessage(
   const imageItems = extractAllImageItems(msg.item_list);
   const imageItem = imageItems[0];
   const fileItem = extractFirstFileItem(msg.item_list);
+  // 「先文后图」：微信常把图+文拆成两条消息，图片消息无文字时用上一条文字作配文
+  const effectiveText = userText.trim() || (imageItems.length > 0 ? (lastCaption || '') : '');
 
   // -- Command routing --
 
@@ -640,7 +646,7 @@ async function handleMessage(
   if (imageItems.length > 0) {
     const imagePaths = await downloadAllImagesToFiles(imageItems);
     if (imagePaths.length >= 2) {
-      const shotResult = routeMultiScreenshotError(imagePaths, config, userText);
+      const shotResult = routeMultiScreenshotError(imagePaths, config, effectiveText);
       if (shotResult.handled && shotResult.reply) {
         sessionStore.addChatMessage(session, 'user', userText || `(图片×${imagePaths.length}-录入错题)`);
         sessionStore.addChatMessage(session, 'assistant', shotResult.reply);
@@ -662,12 +668,12 @@ async function handleMessage(
       }
     } else if (imagePaths.length === 1) {
       const imagePath = imagePaths[0];
-      const explicitErrorLog = shouldRouteScreenshotError(userText, true);
+      const explicitErrorLog = shouldRouteScreenshotError(effectiveText, true);
       const preflight = preflightScreenshot(imagePath, config);
       const isErrorResult = preflight?.screenshotType === 'error_result';
 
       if (explicitErrorLog || isErrorResult) {
-        const shotResult = routeScreenshotError(imagePath, config, userText);
+        const shotResult = routeScreenshotError(imagePath, config, effectiveText);
         if (shotResult.handled && shotResult.reply) {
           sessionStore.addChatMessage(session, 'user', userText || '(图片-录入错题)');
           sessionStore.addChatMessage(session, 'assistant', shotResult.reply);
@@ -690,17 +696,17 @@ async function handleMessage(
       }
 
       // 章节练习统计截图（配文带章节名，或 OCR 自动识别统计页）
-      const chapterFromCaption = extractChapterFromCaption(userText);
+      const chapterFromCaption = extractChapterFromCaption(effectiveText);
       const cpPreflight = preflightChapterPractice(imagePath, config);
       const tryChapterPractice =
-        shouldRouteChapterPractice(userText, true)
+        shouldRouteChapterPractice(effectiveText, true)
         || (cpPreflight?.isStats && !!(chapterFromCaption || cpPreflight.chapter));
 
       if (tryChapterPractice) {
         const chapter = chapterFromCaption || cpPreflight?.chapter;
         if (chapter) {
           logger.info('Athena route: chapter practice', { chapter, fromOcr: !chapterFromCaption });
-          const cpResult = routeChapterPractice(imagePath, config, chapter, userText);
+          const cpResult = routeChapterPractice(imagePath, config, chapter, effectiveText);
           if (cpResult.handled && cpResult.reply) {
             sessionStore.addChatMessage(session, 'user', userText || `(图片-章节练习-${chapter})`);
             sessionStore.addChatMessage(session, 'assistant', cpResult.reply);
@@ -725,7 +731,7 @@ async function handleMessage(
       }
 
       if (preflight?.screenshotType === 'plain_question' && !explicitErrorLog) {
-        const plainSaved = savePendingPlainFromImage(imagePath, config, userText);
+        const plainSaved = savePendingPlainFromImage(imagePath, config, effectiveText);
         if (plainSaved.saved) {
           sessionStore.addChatMessage(session, 'user', userText || '(图片-题干截图)');
           const plainReply =
