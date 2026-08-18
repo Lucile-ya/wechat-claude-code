@@ -129,6 +129,16 @@ const CHAPTER_AREA_ALIASES: Record<string, string> = {
   干系人: '干系人管理',
   敏捷: '敏捷/混合方法',
   商业: '商业环境',
+  时间管理: '进度管理',
+  时间: '进度管理',
+  工期: '进度管理',
+  费用: '成本管理',
+  相关方: '干系人管理',
+  整体: '整合管理',
+  团队: '资源管理',
+  人力: '资源管理',
+  领导力: '领导力/人员',
+  人员: '领导力/人员',
 };
 
 const CHAPTER_PRACTICE_TRIGGERS = [
@@ -428,6 +438,8 @@ export function isLikelyAthenaCommand(text: string): boolean {
   if (isKnowledgeSummaryQuery(trimmed)) return true;
   if (/^(详细|展开|套路|情景|关联)\s*/.test(trimmed)) return true;
   if (looksLikeDailyDate(trimmed)) return true;
+  if (/^(今日练习|今日计划|三步走|今天练什么|今日详细计划)$/.test(trimmed)) return true;
+  if (/^专项(?:练习)?\s*[:：]?\s*.+/.test(trimmed)) return true;
   return false;
 }
 
@@ -693,6 +705,20 @@ function parseJson<T>(text: string): T | null {
     }
     return null;
   }
+}
+
+function resolvePracticeArea(raw: string): string {
+  const t = raw.trim();
+  if (!t) return t;
+  if (CHAPTER_AREA_ALIASES[t]) return CHAPTER_AREA_ALIASES[t];
+  const sorted = Object.entries(CHAPTER_AREA_ALIASES).sort((a, b) => b[0].length - a[0].length);
+  for (const [alias, area] of sorted) {
+    if (t.includes(alias)) return area;
+  }
+  for (const area of KNOWLEDGE_AREA_NAMES) {
+    if (t.includes(area)) return area;
+  }
+  return t;
 }
 
 function startReview(config: Config): AthenaRouteResult {
@@ -1354,7 +1380,16 @@ export function routeAthenaMessage(
       }
       return { handled: false };
     }
-    if (/^(今日计划|今日详细计划)$/.test(trimmed)) {
+    if (/^(今日练习|今日计划|三步走|今天练什么)$/.test(trimmed)) {
+      logger.info('Athena hard route: three-step plan');
+      const { ok, stdout, stderr } = runModuleScript(config, 'study_advice.py', ['three-step']);
+      if (ok) {
+        const r = parseJson<{ status: string; text: string }>(stdout);
+        if (r?.text) return { handled: true, reply: r.text };
+      }
+      return { handled: false };
+    }
+    if (/^今日详细计划$/.test(trimmed)) {
       logger.info('Athena hard route: daily plan');
       const { ok, stdout, stderr } = runModuleScript(config, 'study_advice.py', ['daily-plan']);
       if (ok) {
@@ -1362,6 +1397,23 @@ export function routeAthenaMessage(
         if (r?.text) return { handled: true, reply: r.text };
       }
       return { handled: false };
+    }
+    // ── 专项领域练习（专项 成本管理 / 专项 时间管理，硬路由）──
+    const areaMatch = trimmed.match(/^专项(?:练习)?\s*[:：]?\s*(.+)$/);
+    if (areaMatch) {
+      const raw = areaMatch[1].trim();
+      if (raw) {
+        const area = resolvePracticeArea(raw);
+        logger.info('Athena hard route: area practice', { raw, area });
+        const { ok: ok2, stdout: so, stderr: se } = runModuleScript(config, 'daily_practice.py', [
+          'area-start', '--area', area, '--json',
+        ]);
+        if (ok2) {
+          const r = parseJson<{ status: string; text: string }>(so);
+          if (r?.text) return { handled: true, reply: r.text };
+        }
+        return { handled: true, reply: `⚠️ 专项练习启动失败\n${se || so || ''}`.trim() };
+      }
     }
   }
 
