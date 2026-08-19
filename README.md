@@ -128,6 +128,13 @@ npm run daemon -- logs     # 查看日志
 └── logs/           # 运行日志（每日轮转，保留 30 天）
 ```
 
+## PMP Athena 定制
+
+这是一个 **PMP 备考定制 fork**，在桥接基础上增加了一套硬路由：识别 PMP 备考指令（判卷 / 复习错题 / 每日一练 / 模考 / 今日练习 / 专项 / 分析趋势等），直接调用 [pmp-athena](https://github.com/Lucile-ya/pmp-athena) 的 Python 脚本，不经 Claude。
+
+- 定制说明与部署：见 [ATHENA.md](ATHENA.md)
+- 变更日志：见 [CHANGELOG.md](CHANGELOG.md)
+
 ## License
 
 [MIT](LICENSE)
