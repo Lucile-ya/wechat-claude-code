@@ -11,7 +11,8 @@
     "dev": "tsc --watch",
     "test": "node --test dist/tests/*.test.js",
     "setup": "node dist/main.js setup",
-    "daemon": "bash scripts/daemon.sh",
+    "reset": "powershell -ExecutionPolicy Bypass -File scripts/reset-bridge.ps1",
+    "daemon": "node scripts/daemon-cli.mjs",
     "visualize": "npx tsx src/tools/visualize-logs.ts"
   },
   "dependencies": {

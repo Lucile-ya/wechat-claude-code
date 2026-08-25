@@ -185,6 +185,10 @@ export class WeChatApi {
         delay = Math.min(delay * 2, 20_000);
         continue;
       }
+      if (res.ret !== undefined && res.ret !== 0) {
+        logger.warn('sendMessage failed', { ret: res.ret, errmsg: res.errmsg, userId });
+        throw new Error(`sendMessage failed: ret=${res.ret} ${res.errmsg ?? ''}`);
+      }
       return;
     }
   }

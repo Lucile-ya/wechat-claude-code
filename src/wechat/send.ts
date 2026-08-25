@@ -11,6 +11,8 @@ export function createSender(api: WeChatApi, botAccountId: string) {
   let clientCounter = 0;
   const typingTicketCache = new Map<string, { ticket: string; fetchedAt: number }>();
   const TICKET_TTL = 24 * 60 * 60 * 1000;
+  /** 出站串行链：防止 Athena 硬路由 / Claude 流式 / pending 补发 交错串线 */
+  let sendChain: Promise<void> = Promise.resolve();
 
   function generateClientId(): string {
     return `wcc-${Date.now()}-${++clientCounter}`;
@@ -90,28 +92,37 @@ export function createSender(api: WeChatApi, botAccountId: string) {
   }
 
   async function sendText(toUserId: string, contextToken: string, text: string): Promise<void> {
-    const clientId = generateClientId();
+    const task = sendChain.then(async () => {
+      const clientId = generateClientId();
 
-    const items: MessageItem[] = [
-      {
-        type: MessageItemType.TEXT,
-        text_item: { text },
-      },
-    ];
+      const items: MessageItem[] = [
+        {
+          type: MessageItemType.TEXT,
+          text_item: { text },
+        },
+      ];
 
-    const msg: OutboundMessage = {
-      from_user_id: botAccountId,
-      to_user_id: toUserId,
-      client_id: clientId,
-      message_type: MessageType.BOT,
-      message_state: MessageState.FINISH,
-      context_token: contextToken,
-      item_list: items,
-    };
+      const msg: OutboundMessage = {
+        from_user_id: botAccountId,
+        to_user_id: toUserId,
+        client_id: clientId,
+        message_type: MessageType.BOT,
+        message_state: MessageState.FINISH,
+        context_token: contextToken,
+        item_list: items,
+      };
 
-    logger.info('Sending text message', { toUserId, clientId, textLength: text.length });
-    await api.sendMessage({ msg });
-    logger.info('Text message sent', { toUserId, clientId });
+      logger.info('Sending text message', {
+        toUserId,
+        clientId,
+        textLength: text.length,
+        contextTokenLen: contextToken?.length ?? 0,
+      });
+      await api.sendMessage({ msg });
+      logger.info('Text message sent', { toUserId, clientId });
+    });
+    sendChain = task.catch(() => {});
+    await task;
   }
 
   async function sendFile(toUserId: string, contextToken: string, filePath: string): Promise<void> {

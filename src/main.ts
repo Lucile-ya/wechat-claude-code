@@ -32,28 +32,23 @@ import { logger } from './logger.js';
 import { DATA_DIR } from './constants.js';
 import { MessageType, type WeixinMessage } from './wechat/types.js';
 import { loadPendingQueue, savePendingQueue, appendPending, type PendingItem } from './pending-queue.js';
+import {
+  COALESCE_WINDOW_MS,
+  decideCoalesce,
+  mergeMessages,
+} from './inbound-coalescer.js';
+import {
+  markSeqSeenCrossProcess,
+  clearAccountDedupMarkers,
+  clearLegacySeqMarkers,
+} from './msg-dedup.js';
+import { clearSyncBuf } from './wechat/sync-buf.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
 const MAX_MESSAGE_LENGTH = 4000;
-const MSG_DEDUP_DIR = join(DATA_DIR, 'msg-dedup');
-
-/** 跨进程去重：多实例误启动时同一 seq 只处理一次 */
-function markSeqSeenCrossProcess(seq: number): boolean {
-  mkdirSync(MSG_DEDUP_DIR, { recursive: true });
-  const marker = join(MSG_DEDUP_DIR, `${seq}.marker`);
-  try {
-    const fd = openSync(marker, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY);
-    writeSync(fd, String(Date.now()));
-    closeSync(fd);
-    return true;
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'EEXIST') return false;
-    return true;
-  }
-}
 
 // Extensions eligible for auto-push when detected in Claude's response
 const AUTO_PUSH_EXTENSIONS = new Set([
@@ -284,6 +279,15 @@ async function runSetup(): Promise<void> {
   config.workingDirectory = workingDir;
   saveConfig(config);
 
+  const account = loadLatestAccount();
+  if (account) {
+    clearLegacySeqMarkers();
+    clearAccountDedupMarkers(account.accountId);
+    clearSyncBuf(account.accountId);
+    console.log(`已清理消息去重 + poll 缓存。当前 bot：${account.accountId}`);
+    console.log('⚠️ 请在微信里找到【本次扫码对应的新对话】发消息，不要沿用旧对话。');
+  }
+
   console.log('运行 npm run daemon -- start 启动服务');
 }
 
@@ -430,6 +434,12 @@ async function runDaemon(): Promise<void> {
     sessionStore.save(account.accountId, session);
   }
 
+  // 换绑/重启后清理旧版 seq-only 去重标记（曾导致新 bot seq 从 1 重计被误杀）
+  const legacyCleared = clearLegacySeqMarkers();
+  if (legacyCleared > 0) {
+    logger.info('Cleared legacy msg-dedup markers on startup', { count: legacyCleared });
+  }
+
   const sender = createSender(api, account.accountId);
   const sharedCtx = { lastContextToken: '' };
   const activeControllers = new Map<string, AbortController>();
@@ -443,6 +453,34 @@ async function runDaemon(): Promise<void> {
   let processingQueue = false;
   let lastUserText = '';  // 上一条用户文字，用于「先文后图」时给图片补配文
   let lastUserTextAt = 0; // 上一条文字的时间戳（只关联 30 秒内的相邻文字）
+
+  // 短消息合并缓冲（对齐上游「消息队列优化」：连发 A/B/C/D 或拆词指令合并后再入队）
+  let coalesceBuffer: WeixinMessage[] = [];
+  let coalesceTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function flushCoalesceToQueue(): void {
+    if (coalesceBuffer.length === 0) return;
+    const merged = mergeMessages(coalesceBuffer);
+    coalesceBuffer = [];
+    if (coalesceTimer) {
+      clearTimeout(coalesceTimer);
+      coalesceTimer = null;
+    }
+    messageQueue.push(merged);
+    void drainQueue();
+  }
+
+  function enqueueIncoming(msg: WeixinMessage): void {
+    if (decideCoalesce(msg).defer) {
+      coalesceBuffer.push(msg);
+      if (coalesceTimer) clearTimeout(coalesceTimer);
+      coalesceTimer = setTimeout(() => flushCoalesceToQueue(), COALESCE_WINDOW_MS);
+      return;
+    }
+    flushCoalesceToQueue();
+    messageQueue.push(msg);
+    void drainQueue();
+  }
 
   async function drainQueue(): Promise<void> {
     if (processingQueue) return;
@@ -485,6 +523,11 @@ async function runDaemon(): Promise<void> {
 
     if (text.startsWith('/stop')) {
       messageQueue.length = 0;
+      coalesceBuffer.length = 0;
+      if (coalesceTimer) {
+        clearTimeout(coalesceTimer);
+        coalesceTimer = null;
+      }
       sender.sendText(msg.from_user_id!, msg.context_token ?? '', '⏹ 已停止当前对话，排队中的消息已清空。').catch(() => {});
     }
     return true;
@@ -493,8 +536,7 @@ async function runDaemon(): Promise<void> {
   const callbacks: MonitorCallbacks = {
     onMessage: async (msg: WeixinMessage) => {
       if (handlePriorityCommand(msg)) return;
-      messageQueue.push(msg);
-      drainQueue();
+      enqueueIncoming(msg);
     },
     onSessionExpired: () => {
       logger.warn('Session expired, will keep retrying...');
@@ -502,7 +544,7 @@ async function runDaemon(): Promise<void> {
     },
   };
 
-  const monitor = createMonitor(api, callbacks);
+  const monitor = createMonitor(api, account.accountId, callbacks);
 
   // -- Graceful shutdown --
 
@@ -551,8 +593,8 @@ async function handleMessage(
       logger.debug('Dropping duplicate message', { seq: msg.seq });
       return;
     }
-    if (!markSeqSeenCrossProcess(msg.seq)) {
-      logger.warn('Dropping cross-process duplicate message', { seq: msg.seq });
+    if (!markSeqSeenCrossProcess(account.accountId, msg.seq)) {
+      logger.warn('Dropping cross-process duplicate message', { seq: msg.seq, accountId: account.accountId });
       return;
     }
     processedSeqs.add(msg.seq);
@@ -859,7 +901,8 @@ async function flushPending(
   logger.info('Flushing pending queue', { accountId, pending: queue.length });
   const stillPending: PendingItem[] = [];
 
-  for (const item of queue) {
+  for (let i = 0; i < queue.length; i++) {
+    const item = queue[i];
     try {
       const chunks = splitMessage(item.text);
       for (const chunk of chunks) {
@@ -868,11 +911,12 @@ async function flushPending(
     } catch (err) {
       logger.warn('Flush stopped at rate-limit, keeping remaining items queued', {
         accountId,
-        flushed: queue.length - stillPending.length - 1,
-        remaining: stillPending.length + 1,
+        failedAt: i,
+        remaining: queue.length - i,
         error: err instanceof Error ? err.message : String(err),
       });
-      stillPending.push(item);
+      stillPending.push(...queue.slice(i));
+      break;
     }
   }
 

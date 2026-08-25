@@ -1,6 +1,21 @@
 # Changelog
 
-本文件记录 PMP Athena 定制（相对上游 wechat-claude-code）的功能变更。
+本文件记录 PMP Athena 定制（相对上游 [wechat-claude-code](https://github.com/Wechat-ggGitHub/wechat-claude-code)）的功能变更。
+
+## v1.0.1-athena — 2026-08-25
+
+### 🔧 消息队列 + Windows 守护（对齐上游 README「后续计划」）
+
+- **msg-dedup 按账号+seq**：修复重新扫码绑定后 seq 从 1 重计、旧 marker 误杀全部消息导致「微信无回复」
+- **setup 自动清理去重缓存**；daemon 启动清理旧版 `N.marker`
+- **入站短消息合并**（`inbound-coalescer.ts`）：700ms 窗口合并连发 A/B/C/D、拆词碎片；完整指令（菜单/做题汇总等）立即处理
+- **出站 sendText 串行链**：Athena 硬路由 / Claude 流式 / pending 补发不再交错
+- **flushPending 修复**：限流失败时保留队列剩余项
+- **Windows daemon**：`daemon.ps1` + `daemon-cli.mjs`，`npm run daemon` 不依赖 WSL/bash
+
+### 🔧 模考
+
+- `mock_exam_engine.py show` + 微信「继续/当前题/模考(误触)」重发当前题
 
 ## v1.0.0-athena — 2026-08-19
 

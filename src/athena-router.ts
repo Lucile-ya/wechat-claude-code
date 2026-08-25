@@ -380,6 +380,20 @@ function runMockExamEngine(
   return runModuleScript(config, 'mock_exam_engine.py', args);
 }
 
+/** 模考进行中重发当前题（mock_exam_engine.py show） */
+function resendMockExamQuestion(config: Config): AthenaRouteResult {
+  const result = runMockExamEngine(config, ['show']);
+  if (!result.ok) {
+    logger.error('mock exam show failed', { stderr: result.stderr });
+    return { handled: true, reply: '⚠️ 重发题目失败，请稍后重试。' };
+  }
+  const r = parseJson<{ status: string; text: string; error?: string }>(result.stdout);
+  if (r?.status === 'error') {
+    return { handled: true, reply: `⚠️ ${r.error || '无题目可显示'}` };
+  }
+  return { handled: true, reply: r?.text || '⚠️ 引擎无返回。' };
+}
+
 /** 调用 pmp_athena/ 下的 Python 脚本 */
 function runModuleScript(
   config: Config,
@@ -1189,12 +1203,11 @@ export function routeAthenaMessage(
     const ABANDON_RE = /^(\u653E\u5F03\u6A21\u8003|\u4E0D\u505A\u4E86|\u53D6\u6D88\u6A21\u8003|abandon)$/;
     if (RESUME_RE.test(trimmed)) {
       const result = runMockExamEngine(config, ['resume']);
-      const r = parseJson<{ status: string; text: string; error?: string; next?: { text?: string } }>(result.stdout);
+      const r = parseJson<{ status: string; text: string; error?: string }>(result.stdout);
       if (r?.status === 'error') {
         return { handled: true, reply: `⚠️ ${r.error || '继续失败'}` };
       }
-      const nextText = r?.next?.text || '';
-      return { handled: true, reply: `${r?.text || '▶️ 模考已继续'}${nextText ? '\n\n' + nextText : ''}` };
+      return { handled: true, reply: r?.text || '▶️ 模考已继续' };
     } else if (ABANDON_RE.test(trimmed)) {
       const result = runMockExamEngine(config, ['abandon']);
       const r = parseJson<{ status: string; text: string }>(result.stdout);
@@ -1258,10 +1271,16 @@ export function routeAthenaMessage(
       return { handled: true, reply: r?.text || '\u26A0\uFE0F \u5F15\u64CE\u65E0\u8FD4\u56DE\u3002' };
     }
 
+    // 重发当前题：继续 / 当前题 / 误触「模考」等
+    const RESEND_Q_RE = /^(继续|继续模考|继续考试|接着做|resume|当前题|重发题目|再看一遍|模考)$/;
+    if (RESEND_Q_RE.test(trimmed)) {
+      return resendMockExamQuestion(config);
+    }
+
     // Block everything else during exam
     return {
       handled: true,
-      reply: `\uD83D\uDCCC \u6A21\u8003\u8FDB\u884C\u4E2D\uFF08\u7B2C ${(engState.current_index || 0) + 1} \u9898\uFF09\n\uD83D\uDCAC \u8BF7\u8F93\u5165 A/B/C/D \u4F5C\u7B54\uFF0C\u6216\u300C\u6682\u505C\u300D\u300C\u653E\u5F03\u6A21\u8003\u300D\u3002`,
+      reply: `\uD83D\uDCCC \u6A21\u8003\u8FDB\u884C\u4E2D\uFF08\u7B2C ${(engState.current_index || 0) + 1} \u9898\uFF09\n\uD83D\uDCAC \u8BF7\u8F93\u5165 A/B/C/D \u4F5C\u7B54\uFF0C\u6216\u300C\u6682\u505C\u300D\u300C\u653E\u5F03\u6A21\u8003\u300D\u3002\n\uD83D\uDCA1 \u53D1\u300C\u5F53\u524D\u9898\u300D\u53EF\u91CD\u53D1\u672C\u9898\u3002`,
     };
   }
 
@@ -1468,12 +1487,11 @@ export function routeAthenaMessage(
   if (/^恢复模考$/.test(trimmed)) {
     logger.info('Athena hard route: recover mock exam');
     const result = runMockExamEngine(config, ['recover']);
-    const r = parseJson<{ status: string; text: string; error?: string; next?: { text?: string } }>(result.stdout);
+    const r = parseJson<{ status: string; text: string; error?: string }>(result.stdout);
     if (r?.status === 'error') {
       return { handled: true, reply: `⚠️ ${r.error || '恢复失败'}` };
     }
-    const nextText = r?.next?.text || '';
-    return { handled: true, reply: `${r?.text || '♻️ 已恢复'}${nextText ? '\n\n' + nextText : ''}` };
+    return { handled: true, reply: r?.text || '♻️ 已恢复' };
   }
 
   // ── 模考入口菜单（裸「模考」/「开始模考」硬路由，不经 Claude）──
