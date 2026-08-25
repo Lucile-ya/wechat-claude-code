@@ -3,16 +3,20 @@ Add-Type @"
 using System;
 using System.Runtime.InteropServices;
 public class SleepUtil {
+  public const uint ES_CONTINUOUS = 0x80000000;
+  public const uint ES_SYSTEM_REQUIRED = 0x00000001;
+  public const uint ES_AWAYMODE_REQUIRED = 0x00000040;
+
   [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
   public static extern uint SetThreadExecutionState(uint esFlags);
+
+  public static void KeepAwake() {
+    SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED);
+  }
 }
 "@
 
-# ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED
-# Must use [uint32] — PowerShell -bor on signed ints yields negative values.
-$flags = [uint32]0x80000000 -bor [uint32]0x00000001 -bor [uint32]0x00000040
-
 while ($true) {
-  [void][SleepUtil]::SetThreadExecutionState([uint32]$flags)
+  [SleepUtil]::KeepAwake()
   Start-Sleep -Seconds 30
 }
