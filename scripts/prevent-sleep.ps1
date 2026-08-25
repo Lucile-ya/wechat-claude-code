@@ -13,8 +13,8 @@ function Get-AwakeProcess() {
     if (-not (Test-Path $PidFile)) { return $null }
     $raw = (Get-Content $PidFile -ErrorAction SilentlyContinue | Select-Object -First 1)
     if (-not $raw) { return $null }
-    $pid = [int]$raw
-    $proc = Get-Process -Id $pid -ErrorAction SilentlyContinue
+    $awakePid = [int]$raw
+    $proc = Get-Process -Id $awakePid -ErrorAction SilentlyContinue
     if ($proc) { return $proc }
     Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
     return $null

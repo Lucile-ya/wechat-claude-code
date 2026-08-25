@@ -75,8 +75,8 @@ function Start-Bridge {
     Sync-PidFile
     $live = @(Get-BridgeProcesses)
     if ($live.Count -ge 1) {
-        $pid = $live[0].ProcessId
-        Write-Host "Started wechat-claude-code daemon (PID: $pid)"
+        $bridgePid = $live[0].ProcessId
+        Write-Host "Started wechat-claude-code daemon (PID: $bridgePid)"
         Write-Host "Logs: $LogDir"
         & (Join-Path $PSScriptRoot 'prevent-sleep.ps1') start | Out-Null
     } else {
