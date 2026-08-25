@@ -9,12 +9,10 @@ public class SleepUtil {
 "@
 
 # ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED
-$ES_CONTINUOUS = 0x80000000
-$ES_SYSTEM_REQUIRED = 0x00000001
-$ES_AWAYMODE_REQUIRED = 0x00000040
-$flags = $ES_CONTINUOUS -bor $ES_SYSTEM_REQUIRED -bor $ES_AWAYMODE_REQUIRED
+# Must use [uint32] — PowerShell -bor on signed ints yields negative values.
+$flags = [uint32]0x80000000 -bor [uint32]0x00000001 -bor [uint32]0x00000040
 
 while ($true) {
-  [void][SleepUtil]::SetThreadExecutionState($flags)
+  [void][SleepUtil]::SetThreadExecutionState([uint32]$flags)
   Start-Sleep -Seconds 30
 }
