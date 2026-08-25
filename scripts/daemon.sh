@@ -25,6 +25,37 @@ macos_plist_path() {
   echo "${HOME}/Library/LaunchAgents/$(macos_plist_label).plist"
 }
 
+macos_caffeinate_pid_file() {
+  echo "${DATA_DIR}/caffeinate.pid"
+}
+
+macos_start_caffeinate() {
+  local pid_file="$(macos_caffeinate_pid_file)"
+  if [ -f "$pid_file" ]; then
+    local old_pid=$(cat "$pid_file" 2>/dev/null)
+    if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
+      return 0
+    fi
+    rm -f "$pid_file"
+  fi
+  if ! command -v caffeinate >/dev/null 2>&1; then
+    return 0
+  fi
+  caffeinate -dims &
+  echo $! > "$pid_file"
+}
+
+macos_stop_caffeinate() {
+  local pid_file="$(macos_caffeinate_pid_file)"
+  if [ -f "$pid_file" ]; then
+    local pid=$(cat "$pid_file" 2>/dev/null)
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" 2>/dev/null || true
+    fi
+    rm -f "$pid_file"
+  fi
+}
+
 macos_is_loaded() {
   launchctl print "gui/$(id -u)/$(macos_plist_label)" &>/dev/null
 }
@@ -36,6 +67,8 @@ macos_start() {
 
   if macos_is_loaded; then
     echo "Already running (or plist loaded)"
+    # Ensure caffeinate helper is running
+    macos_start_caffeinate
     exit 0
   fi
 
@@ -84,10 +117,12 @@ ${plist_extra_env}  </dict>
 PLIST
 
   launchctl load "$plist_path"
+  macos_start_caffeinate
   echo "Started wechat-claude-code daemon (macOS launchd)"
 }
 
 macos_stop() {
+  macos_stop_caffeinate
   local plist_label="$(macos_plist_label)"
   local plist_path="$(macos_plist_path)"
 

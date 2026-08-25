@@ -2,6 +2,18 @@
 
 本文件记录 PMP Athena 定制（相对上游 [wechat-claude-code](https://github.com/Wechat-ggGitHub/wechat-claude-code)）的功能变更。
 
+## v1.0.2-athena — 2026-08-25
+
+### 🔧 体验优化
+
+- **Athena 硬路由长回复**：模考报告 / 薄弱点 / 趋势分析等改走 `sendReplyOrQueue`，限流时持久化补发，不再静默丢后半段
+- **分块发送改进**：限流失败时只暂存未发出的 chunk，避免重复推送
+- **统一限流提示**：`RATE_LIMIT_NUDGE` 文案，用户再发消息即触发 `flushPending`
+- **Windows 防睡眠**：daemon 启动时自动运行 `prevent-sleep-worker.ps1`（对齐上游 caffeinate 计划）
+- **macOS caffeinate**：launchd 启动时附带 `caffeinate -dims`
+- **daemon 状态修复**：`Sync-PidFile` 以实际 node 进程为准，不再显示过时 PID
+- **npm run visualize**：默认打开今日日志 HTML 对比页（Claude 输出 vs 微信实际收到）
+
 ## v1.0.1-athena — 2026-08-25
 
 ### 🔧 消息队列 + Windows 守护（对齐上游 README「后续计划」）

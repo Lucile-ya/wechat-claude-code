@@ -13,7 +13,7 @@
     "setup": "node dist/main.js setup",
     "reset": "powershell -ExecutionPolicy Bypass -File scripts/reset-bridge.ps1",
     "daemon": "node scripts/daemon-cli.mjs",
-    "visualize": "npx tsx src/tools/visualize-logs.ts"
+    "visualize": "npx tsx src/tools/visualize-logs.ts --open"
   },
   "dependencies": {
 "qrcode": "^1.5.4",

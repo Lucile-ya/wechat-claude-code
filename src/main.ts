@@ -152,27 +152,48 @@ function splitMessage(text: string, maxLen: number = MAX_MESSAGE_LENGTH): string
   return chunks;
 }
 
-/** Send reply; on WeChat rate-limit park to pending queue instead of silently dropping. */
+/** Send reply; on WeChat rate-limit park unsent chunks to pending queue. */
 async function sendReplyOrQueue(
   accountId: string,
   toUserId: string,
   contextToken: string,
   sender: ReturnType<typeof createSender>,
   text: string,
+  role: 'interstitial' | 'final' = 'final',
 ): Promise<'sent' | 'queued'> {
-  try {
-    for (const chunk of splitMessage(text)) {
-      await sender.sendText(toUserId, contextToken, chunk);
+  const chunks = splitMessage(text);
+  for (let i = 0; i < chunks.length; i++) {
+    try {
+      await sender.sendText(toUserId, contextToken, chunks[i]);
+    } catch (err) {
+      const remaining = chunks.slice(i).join('\n\n');
+      appendPending(accountId, { text: remaining, role, queuedAt: Date.now() });
+      logger.warn('Reply queued after send failure', {
+        accountId,
+        textLength: remaining.length,
+        role,
+        chunkIndex: i,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return 'queued';
     }
-    return 'sent';
-  } catch (err) {
-    appendPending(accountId, { text, role: 'final', queuedAt: Date.now() });
-    logger.warn('Reply queued after send failure', {
-      accountId,
-      textLength: text.length,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return 'queued';
+  }
+  return 'sent';
+}
+
+const RATE_LIMIT_NUDGE =
+  '⏳ 部分回复因微信限流暂存，再发任意消息我会继续补发。';
+
+async function sendReplyOrQueueSafe(
+  accountId: string,
+  toUserId: string,
+  contextToken: string,
+  sender: ReturnType<typeof createSender>,
+  text: string,
+): Promise<void> {
+  const status = await sendReplyOrQueue(accountId, toUserId, contextToken, sender, text);
+  if (status === 'queued') {
+    await sendReplyOrQueue(accountId, toUserId, contextToken, sender, RATE_LIMIT_NUDGE).catch(() => {});
   }
 }
 
@@ -658,7 +679,7 @@ async function handleMessage(
     const result: CommandResult = routeCommand(ctx);
 
     if (result.handled && result.reply) {
-      await sender.sendText(fromUserId, contextToken, result.reply);
+      await sendReplyOrQueueSafe(account.accountId, fromUserId, contextToken, sender, result.reply);
       session.state = 'idle';
       sessionStore.save(account.accountId, session);
       return;
@@ -704,8 +725,8 @@ async function handleMessage(
             fromUserId,
             contextToken,
             sender,
-            '⏳ 录入成功，回复因微信限流暂存，稍后会自动补发（或再发任意消息触发补发）。',
-          );
+            RATE_LIMIT_NUDGE,
+          ).catch(() => {});
         }
         session.state = 'idle';
         sessionStore.save(account.accountId, session);
@@ -731,7 +752,7 @@ async function handleMessage(
               fromUserId,
               contextToken,
               sender,
-              '⏳ 录入成功，回复因微信限流暂存，稍后会自动补发（或再发任意消息触发补发）。',
+              RATE_LIMIT_NUDGE,
             );
           }
           session.state = 'idle';
@@ -837,10 +858,9 @@ async function handleMessage(
       if (athenaResult.reply) {
         sessionStore.addChatMessage(session, 'user', userText);
         sessionStore.addChatMessage(session, 'assistant', athenaResult.reply);
-        const chunks = splitMessage(athenaResult.reply);
-        for (const chunk of chunks) {
-          await sender.sendText(fromUserId, contextToken, chunk);
-        }
+        await sendReplyOrQueueSafe(
+          account.accountId, fromUserId, contextToken, sender, athenaResult.reply,
+        );
       }
       session.state = 'idle';
       sessionStore.save(account.accountId, session);

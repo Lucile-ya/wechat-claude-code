@@ -23,7 +23,17 @@ function Get-BridgeProcesses() {
         Where-Object { Test-BridgeProcess $_.CommandLine }
 }
 
+function Sync-PidFile {
+    $procs = @(Get-BridgeProcesses)
+    if ($procs.Count -eq 0) {
+        if (Test-Path $PidFile) { Remove-Item $PidFile -Force -ErrorAction SilentlyContinue }
+        return
+    }
+    Set-Content -Path $PidFile -Value $procs[0].ProcessId -Encoding ascii
+}
+
 function Stop-Bridge {
+    & (Join-Path $PSScriptRoot 'prevent-sleep.ps1') stop | Out-Null
     $procs = @(Get-BridgeProcesses)
     foreach ($p in $procs) {
         Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
@@ -39,9 +49,11 @@ function Stop-Bridge {
 }
 
 function Start-Bridge {
+    Sync-PidFile
     $existing = @(Get-BridgeProcesses)
     if ($existing.Count -gt 0) {
         Write-Host "Already running (PID: $($existing[0].ProcessId))"
+        & (Join-Path $PSScriptRoot 'prevent-sleep.ps1') start | Out-Null
         return
     }
 
@@ -60,10 +72,13 @@ function Start-Bridge {
     Set-Content -Path $PidFile -Value $proc.Id -Encoding ascii
     Start-Sleep -Seconds 2
 
-    $count = @(Get-BridgeProcesses).Count
-    if ($count -ge 1) {
-        Write-Host "Started wechat-claude-code daemon (PID: $($proc.Id))"
+    Sync-PidFile
+    $live = @(Get-BridgeProcesses)
+    if ($live.Count -ge 1) {
+        $pid = $live[0].ProcessId
+        Write-Host "Started wechat-claude-code daemon (PID: $pid)"
         Write-Host "Logs: $LogDir"
+        & (Join-Path $PSScriptRoot 'prevent-sleep.ps1') start | Out-Null
     } else {
         Write-Host 'Failed to start. Check stderr.log:'
         if (Test-Path $stderr) { Get-Content $stderr -Tail 20 }
@@ -72,6 +87,7 @@ function Start-Bridge {
 }
 
 function Show-Status {
+    Sync-PidFile
     $procs = @(Get-BridgeProcesses)
     if ($procs.Count -eq 0) {
         Write-Host 'Not running'
@@ -79,6 +95,7 @@ function Show-Status {
         Write-Host "Running ($($procs.Count) instance(s)):"
         $procs | ForEach-Object { Write-Host "  PID $($_.ProcessId)" }
     }
+    & (Join-Path $PSScriptRoot 'prevent-sleep.ps1') status
 }
 
 function Show-Logs {
