@@ -196,6 +196,7 @@ function isCheatsheetRequest(text: string): boolean {
   const exact = new Set([
     '薄弱点速记', '薄弱速记', '速记菜单', '速记清单', '速记列表',
     '今日速记', '今天速记', '每日速记',
+    '刷新速记', '同步速记', '更新速记', '速记同步',
   ]);
   if (exact.has(t)) return true;
   if (/^速记\s*.+/.test(t)) return true;
