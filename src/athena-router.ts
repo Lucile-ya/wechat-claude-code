@@ -164,12 +164,16 @@ const REVIEW_TRIGGERS = [
 const MOCK_EXAM_TRIGGERS = [
   /^模考$/,
   /^开始模考/,
+  /^开始2609/,
+  /^2609期模考/,
+  /^2609英文模考/,
   /^随机模考$/,
   /^继续模考$/,
   /^模考状态$/,
   /^模考清单$/,
   /^模考看板$/,
   /^模考进度$/,
+  /^模拟[一二]$/,
 ];
 
 const WEAKNESS_TRIGGERS = [
@@ -392,6 +396,51 @@ function runMockExamEngine(
   args: string[],
 ): { ok: boolean; stdout: string; stderr: string } {
   return runModuleScript(config, 'mock_exam_engine.py', args);
+}
+
+/** 解析模考启动指令 → mock_exam_engine paper key */
+function resolveMockPaperKey(text: string): string | null {
+  const t = text.trim();
+  const numbered = t.match(/^开始模考([一二三四五六七八12345678])$/);
+  if (numbered) {
+    const d = numbered[1];
+    return (d === '一' || d === '1') ? 'one'
+      : (d === '二' || d === '2') ? 'two'
+      : (d === '三' || d === '3') ? 'three'
+      : (d === '四' || d === '4') ? 'four'
+      : (d === '五' || d === '5') ? 'five'
+      : (d === '六' || d === '6') ? 'six'
+      : (d === '七' || d === '7') ? 'seven'
+      : 'eight';
+  }
+  const aliases: Array<[RegExp, string]> = [
+    [/^(2609期模考一|开始2609期模考一|2609期PMP模考一|骐迹模考)$/u, 'seven'],
+    [/^(2609英文模考|开始2609英文模考|希赛模考|PMP.?模考题.?2609)$/iu, 'eight'],
+    [/^(模拟一|开始模拟一)$/u, 'five'],
+    [/^(模拟二|开始模拟二)$/u, 'six'],
+    [/^(考前冲刺卷1|2606PMP模考一)$/u, 'one'],
+    [/^(考前冲刺卷2|2606PMP模考三)$/u, 'two'],
+    [/^(考前冲刺卷3|2606PMP模考四)$/u, 'three'],
+  ];
+  for (const [re, paper] of aliases) {
+    if (re.test(t)) return paper;
+  }
+  return null;
+}
+
+/** 启动指定模考试卷 */
+function startMockExamPaper(config: Config, paper: string): AthenaRouteResult {
+  logger.info('Athena hard route: start mock exam', { paper });
+  const result = runMockExamEngine(config, ['start', '--paper', paper]);
+  const r = parseJson<{ status: string; text: string; error?: string }>(result.stdout);
+  if (r?.status === 'error') {
+    return { handled: true, reply: `⚠️ ${r.error || '启动模考失败'}` };
+  }
+  if (r?.status === 'question') {
+    const hint = '📝 模考已启动。逐题作答，输入 A/B/C/D 即可。\n   · 回复「暂停」随时暂停\n   · 回复「放弃模考」退出\n\n';
+    return { handled: true, reply: hint + r.text };
+  }
+  return { handled: true, reply: result.stdout || '⚠️ 启动模考无返回。' };
 }
 
 /** 模考进行中重发当前题（mock_exam_engine.py show） */
@@ -1486,33 +1535,11 @@ export function routeAthenaMessage(
     }
   }
 
-  // ── 模考启动（开始模考一/二/三/五/六/七/八 + 随机模考，硬路由，不经 Claude）──
-  const startMockMatch = trimmed.match(/^开始模考([一二三四五六七八12345678])$/);
+  // ── 模考启动（开始模考一~八 / 卷名别名 + 随机模考，硬路由，不经 Claude）──
+  const mockPaper = resolveMockPaperKey(trimmed);
   const isRandomMock = /^随机模考$/.test(trimmed);
-  if (startMockMatch || isRandomMock) {
-    let paper = 'random';
-    if (startMockMatch) {
-      const d = startMockMatch[1];
-      paper = (d === '一' || d === '1') ? 'one'
-        : (d === '二' || d === '2') ? 'two'
-        : (d === '三' || d === '3') ? 'three'
-        : (d === '四' || d === '4') ? 'four'
-        : (d === '五' || d === '5') ? 'five'
-        : (d === '六' || d === '6') ? 'six'
-        : (d === '七' || d === '7') ? 'seven'
-        : 'eight';
-    }
-    logger.info('Athena hard route: start mock exam', { paper });
-    const result = runMockExamEngine(config, ['start', '--paper', paper]);
-    const r = parseJson<{ status: string; text: string; error?: string }>(result.stdout);
-    if (r?.status === 'error') {
-      return { handled: true, reply: `⚠️ ${r.error || '启动模考失败'}` };
-    }
-    if (r?.status === 'question') {
-      const hint = '📝 模考已启动（共 175 题）。逐题作答，输入 A/B/C/D 即可。\n   · 回复「暂停」随时暂停\n   · 回复「放弃模考」退出\n\n';
-      return { handled: true, reply: hint + r.text };
-    }
-    return { handled: true, reply: result.stdout || '⚠️ 启动模考无返回。' };
+  if (mockPaper || isRandomMock) {
+    return startMockExamPaper(config, mockPaper || 'random');
   }
 
   // ── 恢复上次放弃的模考（硬路由）──
