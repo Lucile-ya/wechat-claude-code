@@ -1486,8 +1486,8 @@ export function routeAthenaMessage(
     }
   }
 
-  // ── 模考启动（开始模考一/二/三/五/六 + 随机模考，硬路由，不经 Claude）──
-  const startMockMatch = trimmed.match(/^开始模考([一二三四五六123456])$/);
+  // ── 模考启动（开始模考一/二/三/五/六/七 + 随机模考，硬路由，不经 Claude）──
+  const startMockMatch = trimmed.match(/^开始模考([一二三四五六七1234567])$/);
   const isRandomMock = /^随机模考$/.test(trimmed);
   if (startMockMatch || isRandomMock) {
     let paper = 'random';
@@ -1498,7 +1498,8 @@ export function routeAthenaMessage(
         : (d === '三' || d === '3') ? 'three'
         : (d === '四' || d === '4') ? 'four'
         : (d === '五' || d === '5') ? 'five'
-        : 'six';
+        : (d === '六' || d === '6') ? 'six'
+        : 'seven';
     }
     logger.info('Athena hard route: start mock exam', { paper });
     const result = runMockExamEngine(config, ['start', '--paper', paper]);
@@ -1537,6 +1538,7 @@ export function routeAthenaMessage(
       '  发送「开始模考四」→ 模考卷二（175题）',
       '  发送「开始模考五」→ 模拟一（180题）',
       '  发送「开始模考六」→ 模拟二（180题）',
+      '  发送「开始模考七」→ 2609期模考一（180题）',
       '',
       '🎲 发送「随机模考」→ 全量题库随机 175 题',
       '📊 发送「模考清单」→ 查看完成进度',
