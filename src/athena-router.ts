@@ -190,6 +190,19 @@ const TREND_TRIGGERS = [
   /^成绩趋势$/,
 ];
 
+/** 薄弱点速记：口诀 + 闪卡 + 陷阱（weak_area_cheatsheet.py） */
+function isCheatsheetRequest(text: string): boolean {
+  const t = text.trim().replace(/[\u200b\uFEFF]/g, '');
+  const exact = new Set([
+    '薄弱点速记', '薄弱速记', '速记菜单', '速记清单', '速记列表',
+    '今日速记', '今天速记', '每日速记',
+  ]);
+  if (exact.has(t)) return true;
+  if (/^速记\s*.+/.test(t)) return true;
+  if (/^.+速记$/.test(t) && t !== '知识点速记') return true;
+  return false;
+}
+
 const FREQUENT_ERROR_TRIGGERS = [
   /^高频错题$/,
   /^常错题$/,
@@ -450,6 +463,7 @@ export function isLikelyAthenaCommand(text: string): boolean {
   if (REDO_DAILY_PREFIX.test(trimmed) || REDO_DAILY_SUFFIX.test(trimmed)) return true;
   if (isPracticeSummaryQuery(trimmed)) return true;
   if (isKnowledgeSummaryQuery(trimmed)) return true;
+  if (isCheatsheetRequest(trimmed)) return true;
   if (/^(详细|展开|套路|情景|关联)\s*/.test(trimmed)) return true;
   if (looksLikeDailyDate(trimmed)) return true;
   if (/^(今日练习|今日计划|三步走|今天练什么|今日详细计划)$/.test(trimmed)) return true;
@@ -993,6 +1007,21 @@ function runTrend(config: Config): AthenaRouteResult {
   return { handled: true, reply: stdout };
 }
 
+function runWeakCheatsheet(config: Config, text: string): AthenaRouteResult {
+  const { ok, stdout, stderr } = runPythonScript(config, 'weak_area_cheatsheet.py', [
+    'message',
+    '--text',
+    text,
+  ]);
+
+  if (!ok) {
+    logger.error('weak area cheatsheet failed', { stderr, text });
+    return { handled: true, reply: '⚠️ 薄弱点速记加载失败，请稍后重试。' };
+  }
+
+  return { handled: true, reply: stdout || '📌 暂无速记内容。' };
+}
+
 function startDailyMenu(config: Config): AthenaRouteResult {
   const { ok, stdout, stderr } = runDailyPractice(config, ['menu', '--json']);
 
@@ -1365,7 +1394,7 @@ export function routeAthenaMessage(
       '📝 刷题：每日一练 | 随机每日一练 | X月X日每日一练答案：XXX',
       '📊 模考：开始模考 | 随机模考 | 模考清单',
       '❌ 错题：复习错题 | 薄弱点 | 高频错题',
-      '📚 学习：X知识点 | 学习计划 | 今日状态 | 分析趋势',
+      '📚 学习：X知识点 | 薄弱点速记 | 今日速记 | 学习计划 | 今日状态 | 分析趋势',
       '🌙 其他：睡前复习 | 倒计时',
       '',
       '💬 直接发送以上任一指令即可',
@@ -1736,6 +1765,12 @@ export function routeAthenaMessage(
   if (TREND_TRIGGERS.some((re) => re.test(trimmed))) {
     logger.info('Athena hard route: trend analysis', { text: trimmed });
     return runTrend(config);
+  }
+
+  // 薄弱点速记（口诀+闪卡，须在 dynamic_knowledge 裸关键词兜底之前）
+  if (isCheatsheetRequest(trimmed)) {
+    logger.info('Athena hard route: weak area cheatsheet', { text: trimmed });
+    return runWeakCheatsheet(config, trimmed);
   }
 
   // 动态知识查询 — 复习/变式模式中跳过，防止"跳过"等指令被误识别
