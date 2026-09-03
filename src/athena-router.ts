@@ -194,6 +194,10 @@ const TREND_TRIGGERS = [
   /^成绩趋势$/,
 ];
 
+/** 今日任务分步闯关 */
+const TODAY_QUEST_START = /^(今日任务|今天任务|今日闯关)$/;
+const TODAY_QUEST_NEXT = /^(开始任务|下一步|继续任务|下一步任务)$/;
+
 /** 薄弱点速记：口诀 + 闪卡 + 陷阱（weak_area_cheatsheet.py） */
 function isCheatsheetRequest(text: string): boolean {
   const t = text.trim().replace(/[\u200b\uFEFF]/g, '');
@@ -215,6 +219,28 @@ const FREQUENT_ERROR_TRIGGERS = [
   /^错题高频$/,
   /^高频错误$/,
 ];
+
+/** 摘要卡：推送全量高频清单（Top 50），区别于默认 Top 5 */
+const FREQUENT_ERROR_SUMMARY_TRIGGERS = [
+  /^高频错题摘要卡$/,
+  /^高频错题摘要$/,
+  /^高频摘要卡$/,
+  /^错题摘要卡$/,
+  /^高频错题清单$/,
+  /^生成高频错题$/,
+];
+
+function isFrequentErrorRequest(text: string): boolean {
+  const t = text.trim();
+  return (
+    FREQUENT_ERROR_TRIGGERS.some((re) => re.test(t)) ||
+    FREQUENT_ERROR_SUMMARY_TRIGGERS.some((re) => re.test(t))
+  );
+}
+
+function isFrequentErrorSummaryRequest(text: string): boolean {
+  return FREQUENT_ERROR_SUMMARY_TRIGGERS.some((re) => re.test(text.trim()));
+}
 
 /** 知识点速查：X知识点 / 知识点 X / 总结X / X速查 / 考点 X 等 */
 function isKnowledgeSummaryQuery(text: string): boolean {
@@ -507,7 +533,7 @@ export function isLikelyAthenaCommand(text: string): boolean {
   if (extractMyAnswerOnly(trimmed) && !/(?:^|\n)\d+[\.．、]/m.test(trimmed)) return true;
   if (REVIEW_TRIGGERS.some((re) => re.test(trimmed))) return true;
   if (WEAKNESS_TRIGGERS.some((re) => re.test(trimmed))) return true;
-  if (FREQUENT_ERROR_TRIGGERS.some((re) => re.test(trimmed))) return true;
+  if (isFrequentErrorRequest(trimmed)) return true;
   if (DAILY_TRIGGERS.some((re) => re.test(trimmed))) return true;
   if (RANDOM_DAILY_TRIGGERS.some((re) => re.test(trimmed))) return true;
   if (REDO_DAILY_PREFIX.test(trimmed) || REDO_DAILY_SUFFIX.test(trimmed)) return true;
@@ -517,6 +543,7 @@ export function isLikelyAthenaCommand(text: string): boolean {
   if (/^(详细|展开|套路|情景|关联)\s*/.test(trimmed)) return true;
   if (looksLikeDailyDate(trimmed)) return true;
   if (/^(今日练习|今日计划|三步走|今天练什么|今日详细计划)$/.test(trimmed)) return true;
+  if (TODAY_QUEST_START.test(trimmed) || TODAY_QUEST_NEXT.test(trimmed)) return true;
   if (/^专项(?:练习)?\s*[:：]?\s*.+/.test(trimmed)) return true;
   return false;
 }
@@ -1017,8 +1044,12 @@ function gradeVariantAnswer(
   return { handled: true, reply: data.text };
 }
 
-function runFrequentErrors(config: Config): AthenaRouteResult {
-  const { ok, stdout, stderr } = runStudyAdvisor(config, ['frequent-errors', '--json']);
+function runFrequentErrors(config: Config, text: string): AthenaRouteResult {
+  const args = ['frequent-errors', '--json'];
+  if (isFrequentErrorSummaryRequest(text)) {
+    args.push('--top', '50');
+  }
+  const { ok, stdout, stderr } = runStudyAdvisor(config, args);
 
   if (!ok) {
     logger.error('frequent-errors failed', { stderr });
@@ -1070,6 +1101,87 @@ function runWeakCheatsheet(config: Config, text: string): AthenaRouteResult {
   }
 
   return { handled: true, reply: stdout || '📌 暂无速记内容。' };
+}
+
+interface TodayQuestResult {
+  status: string;
+  action?: string;
+  text?: string;
+  area?: string;
+}
+
+function startAreaPractice(config: Config, area: string, prefix = ''): AthenaRouteResult {
+  const { ok, stdout, stderr } = runModuleScript(config, 'daily_practice.py', [
+    'area-start', '--area', area, '--json',
+  ]);
+  if (!ok) {
+    logger.error('area practice start failed', { stderr, area });
+    return { handled: true, reply: `⚠️ 专项练习启动失败\n${stderr || stdout || ''}`.trim() };
+  }
+  const r = parseJson<DailyStartResult>(stdout);
+  if (!r?.text) {
+    return { handled: true, reply: `⚠️ 专项练习启动失败\n${stderr || stdout || ''}`.trim() };
+  }
+  const reply = prefix ? `${prefix}\n\n${r.text}` : r.text;
+  if (r.status !== 'question') {
+    return { handled: true, reply };
+  }
+  return {
+    handled: true,
+    reply,
+    sessionPatch: {
+      athena: {
+        mode: 'daily',
+        dailyQuestionIndex: r.question_index ?? 1,
+        dailyTotal: r.total ?? 15,
+        dailyCorrect: 0,
+      },
+    },
+  };
+}
+
+function routeTodayQuestOverview(config: Config): AthenaRouteResult {
+  const { ok, stdout, stderr } = runModuleScript(config, 'daily_quest.py', [
+    'message', '--text', '今日任务',
+  ]);
+  if (!ok) {
+    logger.error('today quest overview failed', { stderr });
+    return { handled: true, reply: '⚠️ 今日任务加载失败，请稍后重试。' };
+  }
+  const r = parseJson<TodayQuestResult>(stdout);
+  return { handled: true, reply: r?.text || stdout || '📌 暂无今日任务。' };
+}
+
+function routeTodayQuestNext(config: Config): AthenaRouteResult {
+  if (hasActiveDailyPractice(config)) {
+    return {
+      handled: true,
+      reply: '📌 专项还在进行中，请先答当前题（A/B/C/D）。做完再发「下一步」。',
+    };
+  }
+  const { ok, stdout, stderr } = runModuleScript(config, 'daily_quest.py', ['next']);
+  if (!ok) {
+    logger.error('today quest next failed', { stderr });
+    return { handled: true, reply: '⚠️ 今日任务推进失败，请稍后重试。' };
+  }
+  const r = parseJson<TodayQuestResult>(stdout);
+  if (!r || r.status !== 'ok') {
+    return { handled: true, reply: r?.text || stdout || '⚠️ 无法解析今日任务' };
+  }
+  if (r.action === 'review') {
+    const review = startReview(config);
+    const intro = r.text ? `${r.text}\n\n` : '';
+    return {
+      handled: true,
+      reply: `${intro}${review.reply || ''}`.trim(),
+      sessionPatch: review.sessionPatch,
+    };
+  }
+  if (r.action === 'area') {
+    const area = r.area || '成本管理';
+    return startAreaPractice(config, area, r.text || '');
+  }
+  return { handled: true, reply: r.text || '📌 今日任务已更新。' };
 }
 
 function startDailyMenu(config: Config): AthenaRouteResult {
@@ -1443,8 +1555,8 @@ export function routeAthenaMessage(
       '',
       '📝 刷题：每日一练 | 随机每日一练 | X月X日每日一练答案：XXX',
       '📊 模考：开始模考 | 随机模考 | 模考清单',
-      '❌ 错题：复习错题 | 薄弱点 | 高频错题',
-      '📚 学习：X知识点 | 薄弱点速记 | 今日速记 | 学习计划 | 今日状态 | 分析趋势',
+      '❌ 错题：复习错题 | 薄弱点 | 高频错题 | 高频错题摘要卡',
+      '📚 学习：今日任务 | X知识点 | 薄弱点速记 | 今日速记 | 学习计划 | 今日状态 | 分析趋势',
       '🌙 其他：睡前复习 | 倒计时',
       '',
       '💬 直接发送以上任一指令即可',
@@ -1478,6 +1590,10 @@ export function routeAthenaMessage(
       }
       return { handled: false };
     }
+    if (TODAY_QUEST_START.test(trimmed)) {
+      logger.info('Athena hard route: today quest overview', { text: trimmed });
+      return routeTodayQuestOverview(config);
+    }
     if (/^(今日练习|今日计划|三步走|今天练什么)$/.test(trimmed)) {
       logger.info('Athena hard route: three-step plan');
       const { ok, stdout, stderr } = runModuleScript(config, 'study_advice.py', ['three-step']);
@@ -1503,14 +1619,7 @@ export function routeAthenaMessage(
       if (raw) {
         const area = resolvePracticeArea(raw);
         logger.info('Athena hard route: area practice', { raw, area });
-        const { ok: ok2, stdout: so, stderr: se } = runModuleScript(config, 'daily_practice.py', [
-          'area-start', '--area', area, '--json',
-        ]);
-        if (ok2) {
-          const r = parseJson<{ status: string; text: string }>(so);
-          if (r?.text) return { handled: true, reply: r.text };
-        }
-        return { handled: true, reply: `⚠️ 专项练习启动失败\n${se || so || ''}`.trim() };
+        return startAreaPractice(config, area);
       }
     }
   }
@@ -1632,6 +1741,14 @@ export function routeAthenaMessage(
       return { handled: true, reply: `👋 已退出复习。${prevTotal > 0 ? summary : ''}`, sessionPatch: { athena: undefined } };
     }
 
+    if (TODAY_QUEST_NEXT.test(trimmed) || TODAY_QUEST_START.test(trimmed)) {
+      return {
+        handled: true,
+        reply: `📌 清错题还在进行中（#${rid}）。\n请先答 A/B/C/D。全部清完后再发「下一步」。\n退出请发「退出复习」。`,
+        sessionPatch: { athena: { mode: 'review', currentErrorId: rid, reviewCorrect: prevCorrect, reviewTotal: prevTotal, isHighFrequency: isHf } },
+      };
+    }
+
     // ── 跳过（支持 "跳过"、"跳过。"、"跳过！"）──
     if (/^跳过[。！!]?$/.test(trimmed) || trimmed === '/skip') {
       logger.info('Athena hard route: review skip', { errorId: rid });
@@ -1697,6 +1814,13 @@ export function routeAthenaMessage(
       logger.info('Athena hard route: exit variant review', { hfErrorId: session.athena.highFrequencyErrorId });
       const summary = `📋 本次复习小结：正确 ${prevCorrect}/${prevTotal}`;
       return { handled: true, reply: `👋 已退出变式巩固。${prevTotal > 0 ? summary : ''}`, sessionPatch: { athena: undefined } };
+    }
+    if (TODAY_QUEST_NEXT.test(trimmed) || TODAY_QUEST_START.test(trimmed)) {
+      return {
+        handled: true,
+        reply: '📌 变式巩固还在进行中。请先答 A/B/C/D，或发「退出复习」后再发「下一步」。',
+        sessionPatch: { athena: session.athena },
+      };
     }
     if (ANSWER_PATTERN.test(trimmed) || MULTI_ANSWER_PATTERN.test(trimmed)) {
       return gradeVariantAnswer(config, session, trimmed);
@@ -1793,6 +1917,12 @@ export function routeAthenaMessage(
     return resolveAndStartDaily(config, trimmed);
   }
 
+  // 今日任务推进（清错题/专项进行中已在上方闸门拦截）
+  if (TODAY_QUEST_NEXT.test(trimmed)) {
+    logger.info('Athena hard route: today quest next', { text: trimmed });
+    return routeTodayQuestNext(config);
+  }
+
   // 趋势分析 / 通过率预测（硬路由，须在动态知识查询兜底之前拦截）
   if (TREND_TRIGGERS.some((re) => re.test(trimmed))) {
     logger.info('Athena hard route: trend analysis', { text: trimmed });
@@ -1836,10 +1966,13 @@ export function routeAthenaMessage(
     return runWeakness(config);
   }
 
-  // 高频错题（总结+解答+口诀）
-  if (FREQUENT_ERROR_TRIGGERS.some((re) => re.test(trimmed))) {
-    logger.info('Athena hard route: frequent errors', { text: trimmed });
-    return runFrequentErrors(config);
+  // 高频错题（总结+解答+口诀）；摘要卡类触发词推送全量 Top 50
+  if (isFrequentErrorRequest(trimmed)) {
+    logger.info('Athena hard route: frequent errors', {
+      text: trimmed,
+      summary: isFrequentErrorSummaryRequest(trimmed),
+    });
+    return runFrequentErrors(config, trimmed);
   }
 
   // 随机每日一练

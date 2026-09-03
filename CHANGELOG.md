@@ -2,6 +2,19 @@
 
 本文件记录 PMP Athena 定制（相对上游 [wechat-claude-code](https://github.com/Wechat-ggGitHub/wechat-claude-code)）的功能变更。
 
+## v1.0.3-athena — 2026-09-03
+
+### 🆕 今日任务分步闯关
+
+- 「今日任务 / 今天任务 / 今日闯关」硬路由 `daily_quest.py`，输出当日清单（清错题 → 专项 → 摘要卡）
+- 「开始任务 / 下一步 / 继续任务」按序推进；专项启动复用 `area-start` 并写入 daily 会话
+- 清错题 / 变式巩固进行中拦截「下一步」，避免抢走当前题
+
+### 🔧 高频错题摘要卡
+
+- 「高频错题摘要卡 / 高频摘要卡 / 错题摘要卡」等走 `frequent-errors --top 50`，区别于默认 Top 5
+- 帮助菜单补「今日任务」「高频错题摘要卡」入口
+
 ## v1.0.2-athena — 2026-08-25
 
 ### 🔧 体验优化

@@ -11,9 +11,10 @@
 | 分类 | 触发词 | 调用脚本 |
 |------|--------|----------|
 | 判卷 | 连续字母串 / 「我的答案是 X」 | `record_answer.py` + 三文件同步 |
-| 复习错题 | 复习错题 / 薄弱点 / 高频错题 | `study_advisor.py` |
+| 复习错题 | 复习错题 / 薄弱点 / 高频错题 / 高频错题摘要卡 | `study_advisor.py` |
 | 每日一练 | 每日一练 / 随机每日一练 / 做X月X日 | `daily_practice.py` |
 | 模考 | 开始模考 / 随机模考 / 继续/暂停/放弃/恢复 | `mock_exam_engine.py` |
+| 今日任务 | 今日任务 / 开始任务 / 下一步 | `daily_quest.py` |
 | 三步走 | 今日练习 / 三步走 / 今日计划 | `study_advice.py three-step` |
 | 专项练习 | 专项 <领域> | `daily_practice.py area-start` |
 | 分析 | 分析趋势 / 通过率预测 | `trend_analysis.py` |
