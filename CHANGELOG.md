@@ -2,6 +2,12 @@
 
 本文件记录 PMP Athena 定制（相对上游 [wechat-claude-code](https://github.com/Wechat-ggGitHub/wechat-claude-code)）的功能变更。
 
+## v1.0.4-athena — 2026-09-03
+
+### 🆕 2609期模考二
+
+- 「开始模考九」/「2609期模考二」/「骐迹模考二」硬路由 `mock_exam_engine.py --paper nine`
+
 ## v1.0.3-athena — 2026-09-03
 
 ### 🆕 今日任务分步闯关

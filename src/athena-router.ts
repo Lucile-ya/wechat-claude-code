@@ -427,7 +427,7 @@ function runMockExamEngine(
 /** 解析模考启动指令 → mock_exam_engine paper key */
 function resolveMockPaperKey(text: string): string | null {
   const t = text.trim();
-  const numbered = t.match(/^开始模考([一二三四五六七八12345678])$/);
+  const numbered = t.match(/^开始模考([一二三四五六七八九123456789])$/);
   if (numbered) {
     const d = numbered[1];
     return (d === '一' || d === '1') ? 'one'
@@ -437,10 +437,12 @@ function resolveMockPaperKey(text: string): string | null {
       : (d === '五' || d === '5') ? 'five'
       : (d === '六' || d === '6') ? 'six'
       : (d === '七' || d === '7') ? 'seven'
-      : 'eight';
+      : (d === '八' || d === '8') ? 'eight'
+      : 'nine';
   }
   const aliases: Array<[RegExp, string]> = [
     [/^(2609期模考一|开始2609期模考一|2609期PMP模考一|骐迹模考)$/u, 'seven'],
+    [/^(2609期模考二|开始2609期模考二|2609期PMP模考二|骐迹模考二)$/u, 'nine'],
     [/^(2609英文模考|开始2609英文模考|希赛模考|PMP.?模考题.?2609)$/iu, 'eight'],
     [/^(模拟一|开始模拟一)$/u, 'five'],
     [/^(模拟二|开始模拟二)$/u, 'six'],
@@ -1644,7 +1646,7 @@ export function routeAthenaMessage(
     }
   }
 
-  // ── 模考启动（开始模考一~八 / 卷名别名 + 随机模考，硬路由，不经 Claude）──
+  // ── 模考启动（开始模考一~九 / 卷名别名 + 随机模考，硬路由，不经 Claude）──
   const mockPaper = resolveMockPaperKey(trimmed);
   const isRandomMock = /^随机模考$/.test(trimmed);
   if (mockPaper || isRandomMock) {
@@ -1677,6 +1679,7 @@ export function routeAthenaMessage(
       '  发送「开始模考六」→ 模拟二（180题）',
       '  发送「开始模考七」→ 2609期模考一（180题）',
       '  发送「开始模考八」→ 2609英文模考（180题）',
+      '  发送「开始模考九」→ 2609期模考二（180题）',
       '',
       '🎲 发送「随机模考」→ 全量题库随机 175 题',
       '📊 发送「模考清单」→ 查看完成进度',
