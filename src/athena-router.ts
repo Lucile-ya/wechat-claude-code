@@ -217,6 +217,16 @@ function isCheatsheetRequest(text: string): boolean {
   return false;
 }
 
+/** 睡前复习（bedtime_review.py）：D-Day 四档 + 错题优先 */
+const BEDTIME_TRIGGERS = [
+  /^(睡前复习|睡前回顾|睡前清单|晚上复习|睡前)[。！!？?\s]*$/,
+];
+
+function isBedtimeRequest(text: string): boolean {
+  const t = text.trim().replace(/[\u200b\uFEFF]/g, '');
+  return BEDTIME_TRIGGERS.some((re) => re.test(t));
+}
+
 const FREQUENT_ERROR_TRIGGERS = [
   /^高频错题$/,
   /^常错题$/,
@@ -547,6 +557,7 @@ export function isLikelyAthenaCommand(text: string): boolean {
   if (isPracticeSummaryQuery(trimmed)) return true;
   if (isKnowledgeSummaryQuery(trimmed)) return true;
   if (isCheatsheetRequest(trimmed)) return true;
+  if (isBedtimeRequest(trimmed)) return true;
   if (/^(详细|展开|套路|情景|关联)\s*/.test(trimmed)) return true;
   if (looksLikeDailyDate(trimmed)) return true;
   if (/^(今日练习|今日计划|三步走|今天练什么|今日详细计划)$/.test(trimmed)) return true;
@@ -1129,6 +1140,21 @@ function runWeakCheatsheet(config: Config, text: string): AthenaRouteResult {
   }
 
   return { handled: true, reply: stdout || '📌 暂无速记内容。' };
+}
+
+function runBedtimeReview(config: Config, text: string): AthenaRouteResult {
+  const { ok, stdout, stderr } = runPythonScript(config, 'bedtime_review.py', [
+    'message',
+    '--text',
+    text,
+  ]);
+
+  if (!ok) {
+    logger.error('bedtime review failed', { stderr, text });
+    return { handled: true, reply: '⚠️ 睡前复习生成失败，请稍后重试。' };
+  }
+
+  return { handled: true, reply: stdout || '🌙 暂无睡前内容。' };
 }
 
 interface TodayQuestResult {
@@ -1834,6 +1860,7 @@ export function routeAthenaMessage(
     WEAKNESS_TRIGGERS.some((re) => re.test(trimmed)) ||
     TREND_TRIGGERS.some((re) => re.test(trimmed)) ||
     TODAY_QUEST_START.test(trimmed) ||
+    isBedtimeRequest(trimmed) ||
     isPracticeSummaryQuery(trimmed) ||
     /^(菜单|帮助|hello|hi|你好)$/i.test(trimmed);
 
@@ -2055,6 +2082,12 @@ export function routeAthenaMessage(
     return runWeakCheatsheet(config, trimmed);
   }
 
+  // 睡前复习（须在 dynamic_knowledge 裸关键词兜底之前）
+  if (isBedtimeRequest(trimmed)) {
+    logger.info('Athena hard route: bedtime review', { text: trimmed });
+    return runBedtimeReview(config, trimmed);
+  }
+
   // 动态知识查询 — 复习/变式模式中跳过，防止"跳过"等指令被误识别
   if (
     session.athena?.mode !== 'review' &&
@@ -2068,7 +2101,8 @@ export function routeAthenaMessage(
         !DAILY_TRIGGERS.some((re) => re.test(trimmed)) &&
         !MOCK_EXAM_TRIGGERS.some((re) => re.test(trimmed)) &&
         !TODAY_QUEST_START.test(trimmed) &&
-        !TODAY_QUEST_NEXT.test(trimmed))
+        !TODAY_QUEST_NEXT.test(trimmed) &&
+        !isBedtimeRequest(trimmed))
     )
   ) {
     const dk = runDynamicKnowledge(config, trimmed);
