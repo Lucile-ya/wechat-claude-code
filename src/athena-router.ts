@@ -1187,27 +1187,41 @@ function routeTodayQuestNext(config: Config): AthenaRouteResult {
 }
 
 function startDailyMenu(config: Config): AthenaRouteResult {
-  const { ok, stdout, stderr } = runDailyPractice(config, ['menu', '--json']);
+  // 查未完成 → 直接开练（每批 5 题，答完再判卷）
+  const { ok, stdout, stderr } = runDailyPractice(config, ['start', '--json']);
 
   if (!ok) {
-    logger.error('daily menu failed', { stderr });
+    logger.error('daily start failed', { stderr });
     return { handled: true, reply: '⚠️ 每日一练加载失败，请稍后重试。' };
   }
 
-  const data = parseJson<DailyMenuResult>(stdout);
+  const data = parseJson<DailyStartResult>(stdout);
   if (!data) {
     return { handled: true, reply: stdout || '⚠️ 无法解析每日一练数据' };
   }
 
-  if (data.status === 'all_done') {
-    return startDailyRandom(config, data.text);
+  if (data.status === 'select') {
+    return {
+      handled: true,
+      reply: data.text,
+      sessionPatch: { athena: { mode: 'daily_select' } },
+    };
+  }
+
+  if (data.status !== 'question') {
+    return { handled: true, reply: data.text };
   }
 
   return {
     handled: true,
     reply: data.text,
     sessionPatch: {
-      athena: { mode: 'daily_select' },
+      athena: {
+        mode: 'daily',
+        dailyQuestionIndex: data.question_index ?? 1,
+        dailyTotal: data.total ?? 10,
+        dailyCorrect: 0,
+      },
     },
   };
 }
