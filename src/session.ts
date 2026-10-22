@@ -45,6 +45,8 @@ export interface Session {
     dailyQuestionIndex?: number;
     dailyTotal?: number;
     dailyCorrect?: number;
+    /** daily=每日一练；area=今日任务/专项 */
+    practiceKind?: 'daily' | 'area';
     /** 高频错题变式巩固 */
     isHighFrequency?: boolean;
     variantIds?: number[];
