@@ -1110,12 +1110,21 @@ interface TodayQuestResult {
   action?: string;
   text?: string;
   area?: string;
+  limit?: number;
+  focus?: string[];
 }
 
-function startAreaPractice(config: Config, area: string, prefix = ''): AthenaRouteResult {
-  const { ok, stdout, stderr } = runModuleScript(config, 'daily_practice.py', [
-    'area-start', '--area', area, '--json',
-  ]);
+function startAreaPractice(
+  config: Config,
+  area: string,
+  prefix = '',
+  limit?: number,
+): AthenaRouteResult {
+  const args = ['area-start', '--area', area, '--json'];
+  if (limit && limit > 0) {
+    args.push('--limit', String(limit));
+  }
+  const { ok, stdout, stderr } = runModuleScript(config, 'daily_practice.py', args);
   if (!ok) {
     logger.error('area practice start failed', { stderr, area });
     return { handled: true, reply: `⚠️ 专项练习启动失败\n${stderr || stdout || ''}`.trim() };
@@ -1135,7 +1144,7 @@ function startAreaPractice(config: Config, area: string, prefix = ''): AthenaRou
       athena: {
         mode: 'daily',
         dailyQuestionIndex: r.question_index ?? 1,
-        dailyTotal: r.total ?? 15,
+        dailyTotal: r.total ?? limit ?? 15,
         dailyCorrect: 0,
       },
     },
@@ -1180,8 +1189,9 @@ function routeTodayQuestNext(config: Config): AthenaRouteResult {
     };
   }
   if (r.action === 'area') {
-    const area = r.area || '成本管理';
-    return startAreaPractice(config, area, r.text || '');
+    const focus = Array.isArray(r.focus) ? r.focus.filter(Boolean) : [];
+    const area = focus.length ? focus.join('+') : (r.area || '成本管理');
+    return startAreaPractice(config, area, r.text || '', r.limit);
   }
   return { handled: true, reply: r.text || '📌 今日任务已更新。' };
 }
