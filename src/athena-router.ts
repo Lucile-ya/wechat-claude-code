@@ -1187,7 +1187,7 @@ function routeTodayQuestNext(config: Config): AthenaRouteResult {
 }
 
 function startDailyMenu(config: Config): AthenaRouteResult {
-  // 查未完成 → 直接开练（每批 5 题，答完再判卷）
+  // 查未完成 → 一次出 10 题并计时，交卷再判卷
   const { ok, stdout, stderr } = runDailyPractice(config, ['start', '--json']);
 
   if (!ok) {
