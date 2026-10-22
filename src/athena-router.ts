@@ -24,17 +24,20 @@ interface ReviewNextResult {
 
 interface GradeReviewResult {
   status: string;
-  correct: boolean;
+  correct: boolean | null;
   error_id: number;
   next_error_id: number | null;
   done?: boolean;
   text: string;
   /** 高频错题变式触发 */
   is_high_frequency?: boolean;
+  is_knowledge_review?: boolean;
   variant_ids?: number[];
   variant_index?: number;
   variant_correct?: number;
   variant_total?: number;
+  variant_sub_mode?: string;
+  root_cause?: string;
 }
 
 interface DailyMenuResult {
@@ -194,9 +197,9 @@ const TREND_TRIGGERS = [
   /^成绩趋势$/,
 ];
 
-/** 今日任务分步闯关 */
-const TODAY_QUEST_START = /^(今日任务|今天任务|今日闯关)$/;
-const TODAY_QUEST_NEXT = /^(开始任务|下一步|继续任务|下一步任务)$/;
+/** 今日任务分步闯关（允许末尾标点，避免微信自动加句号） */
+const TODAY_QUEST_START = /^(今日任务|今天任务|今日闯关)[。！!？?\s]*$/;
+const TODAY_QUEST_NEXT = /^(开始任务|下一步|继续任务|下一步任务)[。！!？?\s]*$/;
 
 /** 薄弱点速记：口诀 + 闪卡 + 陷阱（weak_area_cheatsheet.py） */
 function isCheatsheetRequest(text: string): boolean {
@@ -546,7 +549,7 @@ export function isLikelyAthenaCommand(text: string): boolean {
   if (looksLikeDailyDate(trimmed)) return true;
   if (/^(今日练习|今日计划|三步走|今天练什么|今日详细计划)$/.test(trimmed)) return true;
   if (TODAY_QUEST_START.test(trimmed) || TODAY_QUEST_NEXT.test(trimmed)) return true;
-  if (/^专项(?:练习)?\s*[:：]?\s*.+/.test(trimmed)) return true;
+  if (/^专项(?:练习)?(?:\s*[:：]?\s*.+)?$/.test(trimmed)) return true;
   return false;
 }
 
@@ -902,24 +905,44 @@ function gradeReviewAnswer(
     reviewCorrect: 0,
     reviewTotal: 0,
   };
-  const reviewCorrect = (prev.reviewCorrect ?? 0) + (data.correct ? 1 : 0);
-  const reviewTotal = (prev.reviewTotal ?? 0) + 1;
+  // correct=null（如「无法补录」）不计入对错统计
+  const counted = typeof data.correct === 'boolean';
+  const reviewCorrect = (prev.reviewCorrect ?? 0) + (data.correct === true ? 1 : 0);
+  const reviewTotal = (prev.reviewTotal ?? 0) + (counted ? 1 : 0);
 
-  // ── 变式子模式触发 ──
-  if (data.status === 'graded_variant_pending' && data.variant_ids && data.variant_ids.length > 0) {
+  // ── 变式子模式触发（同坑变式题 / 根因总结，不准跳走）──
+  if (data.status === 'graded_variant_pending') {
+    if (data.variant_ids && data.variant_ids.length > 0) {
+      return {
+        handled: true,
+        reply: data.text,
+        sessionPatch: {
+          athena: {
+            mode: 'variant_review',
+            highFrequencyErrorId: data.error_id,
+            variantIds: data.variant_ids,
+            variantIndex: data.variant_index ?? 0,
+            variantCorrect: data.variant_correct ?? 0,
+            variantTotal: data.variant_total ?? data.variant_ids.length,
+            reviewCorrect,
+            reviewTotal,
+          },
+        },
+      };
+    }
+    // 根因总结 / 变式不足：钉在同一错题上，等「已掌握」「模拟」
     return {
       handled: true,
       reply: data.text,
       sessionPatch: {
         athena: {
-          mode: 'variant_review',
-          highFrequencyErrorId: data.error_id,
-          variantIds: data.variant_ids,
-          variantIndex: data.variant_index ?? 0,
-          variantCorrect: data.variant_correct ?? 0,
-          variantTotal: data.variant_total ?? data.variant_ids.length,
+          mode: 'review',
+          currentErrorId: data.error_id,
           reviewCorrect,
           reviewTotal,
+          isHighFrequency: true,
+          variantSubMode: data.variant_sub_mode || 'summary',
+          rootCause: data.root_cause,
         },
       },
     };
@@ -945,6 +968,7 @@ function gradeReviewAnswer(
         reviewCorrect,
         reviewTotal,
         isHighFrequency: data.is_high_frequency ?? false,
+        isKnowledgeReview: data.is_knowledge_review ?? false,
       },
     },
   };
@@ -1112,6 +1136,27 @@ interface TodayQuestResult {
   area?: string;
   limit?: number;
   focus?: string[];
+}
+
+/** 裸「专项」入口菜单（与模考菜单同级） */
+function areaPracticeMenu(): AthenaRouteResult {
+  const lines = [
+    '🎯 专项练习',
+    '',
+    '📝 四弱优先：',
+    '  发送「专项 成本管理」',
+    '  发送「专项 质量管理」',
+    '  发送「专项 进度管理」',
+    '  发送「专项 范围管理」',
+    '',
+    '📚 其他领域：',
+    '  专项 整合管理 / 资源管理 / 沟通管理 / 风险管理',
+    '  专项 采购管理 / 干系人管理 / 敏捷 / 商业环境 / 领导力',
+    '',
+    '📦 每批 5 题，回复连续字母如 BACDC',
+    '💬 也可直接发「专项 成本」等简称',
+  ];
+  return { handled: true, reply: lines.join('\n') };
 }
 
 function startAreaPractice(
@@ -1581,6 +1626,7 @@ export function routeAthenaMessage(
       '',
       '📝 刷题：每日一练 | 随机每日一练 | X月X日每日一练答案：XXX',
       '📊 模考：开始模考 | 随机模考 | 模考清单',
+      '🎯 专项：专项（看清单）| 专项 成本管理',
       '❌ 错题：复习错题 | 薄弱点 | 高频错题 | 高频错题摘要卡',
       '📚 学习：今日任务 | X知识点 | 薄弱点速记 | 今日速记 | 学习计划 | 今日状态 | 分析趋势',
       '🌙 其他：睡前复习 | 倒计时',
@@ -1616,10 +1662,6 @@ export function routeAthenaMessage(
       }
       return { handled: false };
     }
-    if (TODAY_QUEST_START.test(trimmed)) {
-      logger.info('Athena hard route: today quest overview', { text: trimmed });
-      return routeTodayQuestOverview(config);
-    }
     if (/^(今日练习|今日计划|三步走|今天练什么)$/.test(trimmed)) {
       logger.info('Athena hard route: three-step plan');
       const { ok, stdout, stderr } = runModuleScript(config, 'study_advice.py', ['three-step']);
@@ -1638,6 +1680,11 @@ export function routeAthenaMessage(
       }
       return { handled: false };
     }
+    // ── 专项入口菜单（裸「专项」/「专项练习」）──
+    if (/^专项(?:练习)?$/.test(trimmed)) {
+      logger.info('Athena hard route: area practice menu');
+      return areaPracticeMenu();
+    }
     // ── 专项领域练习（专项 成本管理 / 专项 时间管理，硬路由）──
     const areaMatch = trimmed.match(/^专项(?:练习)?\s*[:：]?\s*(.+)$/);
     if (areaMatch) {
@@ -1647,6 +1694,8 @@ export function routeAthenaMessage(
         logger.info('Athena hard route: area practice', { raw, area });
         return startAreaPractice(config, area);
       }
+      logger.info('Athena hard route: area practice menu (empty area)');
+      return areaPracticeMenu();
     }
   }
 
@@ -1751,11 +1800,26 @@ export function routeAthenaMessage(
     return runPracticeSummary(config, trimmed);
   }
 
+  // 复习/变式闸门内，这些指令视为用户明确换任务，直接放行到后面硬路由
+  const isModeInterruptCommand =
+    DAILY_TRIGGERS.some((re) => re.test(trimmed)) ||
+    RANDOM_DAILY_TRIGGERS.some((re) => re.test(trimmed)) ||
+    DAILY_DATE_START.test(trimmed) ||
+    DATE_WITH_DAILY.test(trimmed) ||
+    DAY_NUM_DAILY.test(trimmed) ||
+    REVIEW_TRIGGERS.some((re) => re.test(trimmed)) ||
+    MOCK_EXAM_TRIGGERS.some((re) => re.test(trimmed)) ||
+    WEAKNESS_TRIGGERS.some((re) => re.test(trimmed)) ||
+    TREND_TRIGGERS.some((re) => re.test(trimmed)) ||
+    TODAY_QUEST_START.test(trimmed) ||
+    isPracticeSummaryQuery(trimmed) ||
+    /^(菜单|帮助|hello|hi|你好)$/i.test(trimmed);
+
   // ═══════════════════════════════════════════════════════════════
   // 错题复习模式：总闸门 — 所有用户输入优先在复习流内处理
   // 只有「退出复习」「结束」「回到主菜单」「停止」等明确指令才退出
   // ═══════════════════════════════════════════════════════════════
-  if (session.athena?.mode === 'review' && session.athena.currentErrorId != null) {
+  if (session.athena?.mode === 'review' && session.athena.currentErrorId != null && !isModeInterruptCommand) {
     const rid = session.athena.currentErrorId;
     const prevCorrect = session.athena.reviewCorrect ?? 0;
     const prevTotal = session.athena.reviewTotal ?? 0;
@@ -1810,9 +1874,12 @@ export function routeAthenaMessage(
       };
     }
 
-    // ── 已掌握 / 未掌握（知识回顾模式）──
-    if (/^(已掌握|未掌握)[。！!]?$/.test(trimmed)) {
-      logger.info('Athena hard route: knowledge review answer', { errorId: rid, answer: trimmed });
+    // ── 已掌握 / 未掌握 / 无法补录 / 根因总结与模拟 ──
+    if (
+      /^(已掌握|未掌握|无法补录|补不了|无法补|总结|模拟)[。！!]?$/.test(trimmed) ||
+      /^陷阱\s*=/.test(trimmed)
+    ) {
+      logger.info('Athena hard route: knowledge/root-cause answer', { errorId: rid, answer: trimmed });
       return gradeReviewAnswer(config, session, trimmed.replace(/[。！!]$/, ''));
     }
 
@@ -1826,7 +1893,7 @@ export function routeAthenaMessage(
     // 不是答案也不是指令 → 提示用户当前在复习中
     return {
       handled: true,
-      reply: `📌 当前在复习错题模式中（#${rid}）。\n💬 请输入 A/B/C/D 作答，或回复「跳过」「已掌握」「未掌握」「退出复习」。`,
+      reply: `📌 当前在复习错题模式中（#${rid}）。\n💬 请输入 A/B/C/D 作答；高频错可回「已掌握」「模拟」「陷阱=X 区分=…」；或「跳过」「退出复习」。`,
       sessionPatch: { athena: { mode: 'review', currentErrorId: rid, reviewCorrect: prevCorrect, reviewTotal: prevTotal, isHighFrequency: isHf } },
     };
   }
@@ -1834,7 +1901,7 @@ export function routeAthenaMessage(
   // ═══════════════════════════════════════════════════════════════
   // 变式巩固模式：总闸门（同样拦截所有输入，防穿透）
   // ═══════════════════════════════════════════════════════════════
-  if (session.athena?.mode === 'variant_review' && session.athena.variantIds != null) {
+  if (session.athena?.mode === 'variant_review' && session.athena.variantIds != null && !isModeInterruptCommand) {
     if (/^(退出复习|结束复习|返回主菜单|停止|退出|结束)$/.test(trimmed)) {
       const prevCorrect = session.athena.reviewCorrect ?? 0;
       const prevTotal = session.athena.reviewTotal ?? 0;
@@ -1944,7 +2011,11 @@ export function routeAthenaMessage(
     return resolveAndStartDaily(config, trimmed);
   }
 
-  // 今日任务推进（清错题/专项进行中已在上方闸门拦截）
+  // 今日任务（须在 dynamic_knowledge 裸关键词兜底之前；清错题/专项进行中已在上方闸门拦截）
+  if (TODAY_QUEST_START.test(trimmed)) {
+    logger.info('Athena hard route: today quest overview', { text: trimmed });
+    return routeTodayQuestOverview(config);
+  }
   if (TODAY_QUEST_NEXT.test(trimmed)) {
     logger.info('Athena hard route: today quest next', { text: trimmed });
     return routeTodayQuestNext(config);
@@ -1967,12 +2038,15 @@ export function routeAthenaMessage(
     session.athena?.mode !== 'review' &&
     session.athena?.mode !== 'variant_review' &&
     (
-    /^(详细|展开|套路|情景|关联)\s*/.test(trimmed) ||
-    (/^[\u4e00-\u9fffA-Za-z/]{2,16}$/.test(trimmed) &&
-      !REVIEW_TRIGGERS.some((re) => re.test(trimmed)) &&
-      !WEAKNESS_TRIGGERS.some((re) => re.test(trimmed)) &&
-      !DAILY_TRIGGERS.some((re) => re.test(trimmed)) &&
-      !MOCK_EXAM_TRIGGERS.some((re) => re.test(trimmed)))
+      /^(详细|展开|套路|情景|关联)\s*/.test(trimmed) ||
+      (/^[\u4e00-\u9fffA-Za-z/]{2,16}$/.test(trimmed) &&
+        !/^专项(?:练习)?$/.test(trimmed) &&
+        !REVIEW_TRIGGERS.some((re) => re.test(trimmed)) &&
+        !WEAKNESS_TRIGGERS.some((re) => re.test(trimmed)) &&
+        !DAILY_TRIGGERS.some((re) => re.test(trimmed)) &&
+        !MOCK_EXAM_TRIGGERS.some((re) => re.test(trimmed)) &&
+        !TODAY_QUEST_START.test(trimmed) &&
+        !TODAY_QUEST_NEXT.test(trimmed))
     )
   ) {
     const dk = runDynamicKnowledge(config, trimmed);

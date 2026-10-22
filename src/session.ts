@@ -52,6 +52,9 @@ export interface Session {
     variantCorrect?: number;
     variantTotal?: number;
     highFrequencyErrorId?: number;
+    /** 根因总结 / 模拟子模式（反复错题钉死流程） */
+    variantSubMode?: string;
+    rootCause?: string;
     /** 选项缺失时：当前题是否等待知识回顾判定（已掌握/未掌握） */
     isKnowledgeReview?: boolean;
   };
