@@ -62,6 +62,8 @@ interface DailyGradeResult {
   done?: boolean;
   question_index?: number;
   total?: number;
+  mode?: string;
+  label?: string;
 }
 
 interface DailyResolveResult {
@@ -1188,6 +1190,7 @@ function startAreaPractice(
     sessionPatch: {
       athena: {
         mode: 'daily',
+        practiceKind: 'area',
         dailyQuestionIndex: r.question_index ?? 1,
         dailyTotal: r.total ?? limit ?? 15,
         dailyCorrect: 0,
@@ -1418,6 +1421,24 @@ function gradeDailyAnswer(
   }
 
   if (data.done || data.status === 'done') {
+    const wasArea =
+      data.mode === 'area' || session.athena?.practiceKind === 'area';
+    if (wasArea) {
+      // 专项做完自动推进今日任务（③摘要卡 / 补练提示）
+      const next = routeTodayQuestNext(config);
+      if (next.handled && next.reply && !next.reply.startsWith('⚠️') && !next.reply.startsWith('📌 专项还在')) {
+        return {
+          handled: true,
+          reply: `${data.text}\n\n────────\n${next.reply}`,
+          sessionPatch: next.sessionPatch ?? { athena: undefined },
+        };
+      }
+      return {
+        handled: true,
+        reply: `${data.text}\n\n💬 专项已交卷。回复「下一步」进入③摘要卡`,
+        sessionPatch: { athena: undefined },
+      };
+    }
     return {
       handled: true,
       reply: data.text,
@@ -1435,6 +1456,7 @@ function gradeDailyAnswer(
     sessionPatch: {
       athena: {
         mode: 'daily',
+        practiceKind: prev.practiceKind,
         dailyQuestionIndex: data.question_index ?? (prev.dailyQuestionIndex ?? 1) + 1,
         dailyTotal: data.total ?? prev.dailyTotal ?? 10,
         dailyCorrect,
