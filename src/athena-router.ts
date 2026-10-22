@@ -465,13 +465,13 @@ function startMockExamPaper(config: Config, paper: string): AthenaRouteResult {
     return { handled: true, reply: `⚠️ ${r.error || '启动模考失败'}` };
   }
   if (r?.status === 'question') {
-    const hint = '📝 模考已启动。逐题作答，输入 A/B/C/D 即可。\n   · 回复「暂停」随时暂停\n   · 回复「放弃模考」退出\n\n';
+    const hint = '📝 模考已启动。每批 10 题，一次回复本批字母（如 BACDCABDCA）。\n   · 本批计时从出题开始\n   · 回复「暂停」随时暂停\n   · 回复「放弃模考」退出\n\n';
     return { handled: true, reply: hint + r.text };
   }
   return { handled: true, reply: result.stdout || '⚠️ 启动模考无返回。' };
 }
 
-/** 模考进行中重发当前题（mock_exam_engine.py show） */
+/** 模考进行中重发本批（mock_exam_engine.py show） */
 function resendMockExamQuestion(config: Config): AthenaRouteResult {
   const result = runMockExamEngine(config, ['show']);
   if (!result.ok) {
@@ -1434,7 +1434,7 @@ export function routeAthenaMessage(
   // \u2500\u2500 \u6A21\u8003 active \u2014 \u53EA\u5904\u7406\u6A21\u8003\u76F8\u5173\u6307\u4EE4 \u2500\u2500
   if (engState?.status === 'active') {
     const ANSWER_RE = /^[A-Ea-e]$/;
-    const ANSWER_BATCH_RE = /^[A-Ea-e]{2,15}$/;
+    const ANSWER_BATCH_RE = /^[A-Ea-e]{2,20}$/;
     const PAUSE_RE = /^(\u6682\u505C|\u6682\u505C\u6A21\u8003|\u5148\u505C\u4E00\u4E0B|pause)$/;
     const ABANDON_RE = /^(\u653E\u5F03\u6A21\u8003|\u4E0D\u505A\u4E86|\u53D6\u6D88\u6A21\u8003|abandon)$/;
     const STATUS_RE = /^(\u6A21\u8003\u8FDB\u5EA6|\u6A21\u8003\u72B6\u6001|\u6A21\u8003\u5230\u54EA\u4E86|\u8FDB\u5EA6)$/;
@@ -1455,10 +1455,10 @@ export function routeAthenaMessage(
       return { handled: true, reply: r?.text || '\uD83D\uDCED \u72B6\u6001\u672A\u77E5\u3002' };
     }
 
-    // Answer routing: multi-letter (multi-select) or single
-    const isMultiLetter = /^[A-Ea-e]{2,8}$/.test(trimmed);
+    // Answer routing: 本批字母串（含多选）或单字母
+    const isMultiLetter = ANSWER_BATCH_RE.test(trimmed);
     if (isMultiLetter) {
-      // Pass as single answer \u2014 engine handles multi-select normalization
+      // 交给引擎按本批题数/多选拆分，字母不够会返回映射表
       const result = runMockExamEngine(config, ['answer', trimmed.toUpperCase()]);
       const r = parseJson<{ status: string; text: string; index?: number; total?: number; error?: string }>(result.stdout);
       if (r?.status === 'error') {
@@ -1487,7 +1487,7 @@ export function routeAthenaMessage(
     // Block everything else during exam
     return {
       handled: true,
-      reply: `\uD83D\uDCCC \u6A21\u8003\u8FDB\u884C\u4E2D\uFF08\u7B2C ${(engState.current_index || 0) + 1} \u9898\uFF09\n\uD83D\uDCAC \u8BF7\u8F93\u5165 A/B/C/D \u4F5C\u7B54\uFF0C\u6216\u300C\u6682\u505C\u300D\u300C\u653E\u5F03\u6A21\u8003\u300D\u3002\n\uD83D\uDCA1 \u53D1\u300C\u5F53\u524D\u9898\u300D\u53EF\u91CD\u53D1\u672C\u9898\u3002`,
+      reply: `\uD83D\uDCCC \u6A21\u8003\u8FDB\u884C\u4E2D\uFF08\u7B2C ${Math.floor((engState.current_index || 0) / 10) + 1} \u6279\uFF09\n\uD83D\uDCAC \u8BF7\u4E00\u6B21\u56DE\u590D\u672C\u6279\u5B57\u6BCD\uFF0C\u6216\u300C\u6682\u505C\u300D\u300C\u653E\u5F03\u6A21\u8003\u300D\u3002\n\uD83D\uDCA1 \u53D1\u300C\u5F53\u524D\u9898\u300D\u53EF\u91CD\u53D1\u672C\u6279\u3002`,
     };
   }
 
