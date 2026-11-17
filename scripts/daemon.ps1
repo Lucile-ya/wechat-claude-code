@@ -1,4 +1,4 @@
-# wechat-claude-code Windows daemon manager
+﻿# wechat-claude-code Windows daemon manager
 param(
     [Parameter(Position = 0)]
     [ValidateSet('start', 'stop', 'restart', 'status', 'logs')]
@@ -61,10 +61,11 @@ function Start-Bridge {
     $stdout = Join-Path $LogDir 'stdout.log'
     $stderr = Join-Path $LogDir 'stderr.log'
 
+    # Hidden：不弹黑窗、不占任务栏（Minimized 仍会冒出来）
     $proc = Start-Process -FilePath $NodeExe `
         -ArgumentList 'dist\main.js', 'start' `
         -WorkingDirectory $ProjectDir `
-        -WindowStyle Minimized `
+        -WindowStyle Hidden `
         -RedirectStandardOutput $stdout `
         -RedirectStandardError $stderr `
         -PassThru
